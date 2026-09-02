@@ -1,0 +1,27 @@
+{
+  "name": "智能客服知识库种子评测集",
+  "description": "query → 期望命中的知识文档（expected_source = 文档文件名）。用于 RAG 检索质量的 Recall@K / MRR 离线评测。",
+  "queries": [
+    {"query": "支持哪些付款方式？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "下单后多久发货？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "产品质保是多久？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "可以开具增值税发票吗？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "设备无法启动怎么排查？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "满多少金额可以包邮？", "expected_source": "FAQ_常见问题与售后服务.md"},
+    {"query": "技术支持的工作时间是什么时候？", "expected_source": "FAQ_常见问题与售后服务.md"},
+
+    {"query": "GW200 网关支持哪些通信协议？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+    {"query": "GW200 的主控芯片是什么？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+    {"query": "网关断网时采集数据会丢失吗？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+    {"query": "GW200 的工作温度范围是多少？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+    {"query": "GW200 能同时挂载多少路子设备？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+    {"query": "GW200 支持 OTA 升级吗？", "expected_source": "产品手册_物联网智能网关GW200.md"},
+
+    {"query": "TH100 的电池能用多久？", "expected_source": "用户指南_温湿度传感器节点TH100.md"},
+    {"query": "TH100 的温度测量精度是多少？", "expected_source": "用户指南_温湿度传感器节点TH100.md"},
+    {"query": "TH100 怎么开机并配对入网？", "expected_source": "用户指南_温湿度传感器节点TH100.md"},
+    {"query": "TH100 数据不上报怎么排查？", "expected_source": "用户指南_温湿度传感器节点TH100.md"},
+    {"query": "TH100 的湿度量程范围？", "expected_source": "用户指南_温湿度传感器节点TH100.md"},
+    {"query": "TH100 采用什么无线方式通信？", "expected_source": "用户指南_温湿度传感器节点TH100.md"}
+  ]
+}

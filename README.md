@@ -192,6 +192,18 @@ docker compose exec app python -m knowledge.ingest # Docker 内
 .venv/Scripts/python.exe -m pytest -q
 ```
 
+### RAG 检索评测（Recall@K / MRR，§5.4）
+
+知识库更新后，用种子评测集离线验证检索质量（`eval/seed_dataset.json`，query → 期望文档）：
+
+```bash
+.venv/Scripts/python.exe -m eval.rag_eval                     # 默认评测集 + K=5,10
+.venv/Scripts/python.exe -m eval.rag_eval --k 5 10 20         # 自定义 K
+ENABLE_RERANKER=0 .venv/Scripts/python.exe -m eval.rag_eval   # 跳过重排，仅 BM25+向量
+```
+
+输出 Recall@K / MRR 与未命中样本（query → 期望 → 实际 top5），供补充知识或调参参考。
+
 ## 十、常见问题
 
 1. **系统 Python 报 `cannot import name '_imaging' from PIL`**：用了 32 位 Python 3.9，请改用 `.venv/Scripts/python.exe`（Python 3.12 64-bit）。

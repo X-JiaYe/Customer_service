@@ -120,14 +120,18 @@ class RagRetrieverTool(Tool):
         """当前请求租户（供指标打标），无上下文时回落 default。"""
         return current_context().get("tenant_id") or "default"
 
-    def forward(self, query: str) -> str:
-        if not self._available:
-            observe_knowledge_miss(self._tenant())
-            return f"知识库检索功能未启用。{self._reason}"
+    def search(self, query: str) -> list[dict]:
+        """纯检索：返回按相关性降序的 chunk 结果，不渲染文本、不打指标。
 
-        if not self._docs:
-            observe_knowledge_miss(self._tenant())
-            return "知识库尚未导入文档，请先运行 python -m knowledge.ingest 导入。"
+        每项字段：id / document / source / chunk_index / score / distance
+        - score：reranker 分数（启用且重排成功时），否则 None
+        - distance：ChromaDB 向量距离（命中向量检索时），否则 None
+
+        供 forward() 渲染与 eval/rag_eval.py 评测（Recall@K / MRR）复用。
+        不可用或未导入时返回 []。
+        """
+        if not self._available or not self._docs:
+            return []
 
         top_k = config.RETRIEVE_TOP_K
         candidates = {}  # chunk_id -> text
@@ -152,12 +156,11 @@ class RagRetrieverTool(Tool):
             pass
 
         if not candidates:
-            observe_knowledge_miss(self._tenant())
-            return "未在知识库中检索到相关内容。"
+            return []
 
         ids = list(candidates.keys())
         docs = [candidates[i] for i in ids]
-        reranker_scores = None
+        reranker_scores = [None] * len(docs)
 
         # 3) Reranker 重排（懒加载，可通过 ENABLE_RERANKER 关闭）
         if config.ENABLE_RERANKER and len(docs) > 1 and self._ensure_reranker():
@@ -171,15 +174,48 @@ class RagRetrieverTool(Tool):
                 docs = [docs[i] for i in order]
                 reranker_scores = [scores[i] for i in order]
             except Exception:
-                reranker_scores = None
+                reranker_scores = [None] * len(ids)
+
+        results = []
+        for cid, doc, sc in zip(ids, docs, reranker_scores):
+            meta = self._meta_by_id.get(cid) or {}
+            results.append(
+                {
+                    "id": cid,
+                    "document": doc,
+                    "source": meta.get("source") or "未知文档",
+                    "chunk_index": meta.get("chunk_index"),
+                    "score": sc,
+                    "distance": distances.get(cid),
+                }
+            )
+        return results
+
+    def forward(self, query: str) -> str:
+        if not self._available:
+            observe_knowledge_miss(self._tenant())
+            return f"知识库检索功能未启用。{self._reason}"
+
+        if not self._docs:
+            observe_knowledge_miss(self._tenant())
+            return "知识库尚未导入文档，请先运行 python -m knowledge.ingest 导入。"
+
+        results = self.search(query)
+        if not results:
+            observe_knowledge_miss(self._tenant())
+            return "未在知识库中检索到相关内容。"
 
         # 置信度：默认门槛 0.0（关闭）；开启后低于门槛 → 低置信度，建议转人工
-        top_distance = distances.get(ids[0]) if ids else None
-        confidence = compute_confidence(reranker_scores, top_distance)
+        scores = [r["score"] for r in results if r["score"] is not None]
+        top_distance = results[0].get("distance")
+        confidence = compute_confidence(scores or None, top_distance)
         low_confidence = confidence < config.RAG_CONFIDENCE_THRESHOLD
 
-        top_n = min(config.RERANK_TOP_N, len(docs))
-        parts = [f"【来源：{self._source_label(ids[i])}】\n{docs[i]}" for i in range(top_n)]
+        top_n = min(config.RERANK_TOP_N, len(results))
+        parts = [
+            f"【来源：{self._source_label(results[i]['id'])}】\n{results[i]['document']}"
+            for i in range(top_n)
+        ]
         result = "\n\n".join(parts)
 
         if low_confidence:
