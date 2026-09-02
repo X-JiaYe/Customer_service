@@ -65,7 +65,8 @@ def create_agent() -> ToolCallingAgent:
 
 
 _agent = None
-_agent_lock = threading.Lock()
+_agent_lock = threading.Lock()       # 串行化 agent.run()，保护其内部可变状态
+_agent_init_lock = threading.Lock()  # 保护 _agent 首次创建（预热线程 vs 请求线程竞争）
 
 
 def _build_prompt(message: str, history: list[dict] | None) -> str:
@@ -85,8 +86,23 @@ def _build_prompt(message: str, history: list[dict] | None) -> str:
 def _ensure_agent() -> ToolCallingAgent:
     global _agent
     if _agent is None:
-        _agent = create_agent()
+        with _agent_init_lock:
+            if _agent is None:
+                _agent = create_agent()
     return _agent
+
+
+def warm_up() -> None:
+    """服务启动阶段预热：加载 embedding + ChromaDB + reranker，避免首条消息冷启动。
+
+    供 main.py 在后台线程调用，代价一次性付在启动阶段；失败仅告警，不影响服务。
+    """
+    agent = _ensure_agent()
+    if not config.ENABLE_RERANKER:
+        return
+    retriever = agent.tools.get("knowledge_retriever")
+    if retriever is not None:
+        retriever._ensure_reranker()
 
 
 def chat(user_message: str, history: list[dict] | None = None) -> str:
