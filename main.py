@@ -118,12 +118,30 @@ def run_gradio():
     import gradio as gr
 
     def respond(message, history):
-        # Gradio 的 history 为 [(user, assistant), ...] 元组列表
+        # Gradio 6.x 的 history 是 MessageDict 列表（dict：role/content/metadata/options），
+        # 不是旧版的 [(user, assistant), ...] 元组列表，需按 dict 读取 role/content。
+        def _as_text(content) -> str:
+            # content 可能是 str，也可能是 list（多模态）；客服场景统一转文本
+            return "".join(str(c) for c in content) if isinstance(content, list) else str(content)
+
         history_dicts = []
-        for user_msg, assistant_msg in history or []:
-            history_dicts.append({"role": "user", "content": user_msg})
-            if assistant_msg:
-                history_dicts.append({"role": "assistant", "content": assistant_msg})
+        for turn in history or []:
+            if isinstance(turn, dict):
+                role, content = turn.get("role"), turn.get("content")
+            elif hasattr(turn, "role") and hasattr(turn, "content"):
+                # 兜底：ChatMessage 等带 role/content 属性的对象
+                role, content = turn.role, turn.content
+            elif isinstance(turn, (tuple, list)) and len(turn) >= 2:
+                # 兼容旧版 (user, assistant) 二元组
+                history_dicts.append({"role": "user", "content": _as_text(turn[0])})
+                if turn[1]:
+                    history_dicts.append({"role": "assistant", "content": _as_text(turn[1])})
+                continue
+            else:
+                continue
+            if role is None or content is None:
+                continue
+            history_dicts.append({"role": role, "content": _as_text(content)})
         try:
             return chat(message, history_dicts)
         except Exception:  # noqa: BLE001
