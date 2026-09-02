@@ -74,6 +74,15 @@ ENABLE_PII_MASK = os.getenv("ENABLE_PII_MASK", "1") == "1"
 # ENV: dev=业务工具用 mock 数据；prod=必须接真实业务接口（mock 路径显式报错）
 ENV = os.getenv("ENV", "dev")
 
+# ---------- 可靠性 / 熔断降级（§5.9） ----------
+# LLM 单次调用超时（秒）；透传给 LiteLLM 的 timeout
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
+# LLM 单次调用失败后的最大重试次数（LiteLLM num_retries，仅对瞬时错误重试）
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
+# 熔断器：连续失败达阈值 → 打开；冷却期后进入半开
+CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3"))
+CIRCUIT_RESET_SECONDS = float(os.getenv("CIRCUIT_RESET_SECONDS", "60"))
+
 # ---------- 路径（绝对化，避免 cwd 差异） ----------
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
 DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())

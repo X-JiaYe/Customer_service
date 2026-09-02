@@ -20,6 +20,7 @@ from smolagents.memory import FinalAnswerStep
 from smolagents.models import ChatMessageStreamDelta
 
 import config
+from resilience import DEGRADE_MESSAGE, create_llm_breaker
 from security import check_output_safety
 from tools import RagRetrieverTool, create_ticket, query_order, transfer_to_human
 
@@ -64,6 +65,9 @@ def create_agent() -> ToolCallingAgent:
         model_id=config.LITELLM_MODEL_ID,
         api_base=config.DEEPSEEK_BASE_URL,
         api_key=config.DEEPSEEK_API_KEY,
+        # 熔断降级 §5.9：单次调用超时 + 上限重试（透传给 LiteLLM）
+        timeout=config.LLM_TIMEOUT,
+        num_retries=config.LLM_MAX_RETRIES,
     )
 
     retriever = RagRetrieverTool()
@@ -83,6 +87,7 @@ def create_agent() -> ToolCallingAgent:
 _agent = None
 _agent_lock = threading.Lock()       # 串行化 agent.run()，保护其内部可变状态
 _agent_init_lock = threading.Lock()  # 保护 _agent 首次创建（预热线程 vs 请求线程竞争）
+_llm_breaker = create_llm_breaker()  # LLM 熔断器（§5.9 依赖降级）
 
 
 def _build_prompt(message: str, history: list[dict] | None) -> str:
@@ -122,18 +127,43 @@ def warm_up() -> None:
 
 
 def chat(user_message: str, history: list[dict] | None = None) -> str:
-    """非流式调用（Gradio 等）。加锁串行化，避免共享 Agent 状态竞争。"""
+    """非流式调用（Gradio 等）。加锁串行化，避免共享 Agent 状态竞争。
+
+    熔断降级 §5.9：熔断打开直接返回降级话术；agent.run() 抛异常计一次失败并降级，
+    不向上抛，保证接口始终有兜底文案返回。
+    """
     prompt = _build_prompt(user_message, history)
+    if not _llm_breaker.allow():
+        return DEGRADE_MESSAGE
     with _agent_lock:
-        return str(_ensure_agent().run(prompt))
+        try:
+            answer = str(_ensure_agent().run(prompt))
+        except Exception as e:  # noqa: BLE001
+            _llm_breaker.record_failure()
+            print(f"[resilience] LLM 调用失败，已记录熔断（连续 {_llm_breaker._failures}）：{e}")
+            return DEGRADE_MESSAGE
+    _llm_breaker.record_success()
+    return answer
 
 
 def chat_stream(user_message: str, history: list[dict] | None = None):
-    """真实流式调用：返回逐 token 的生成器，持有锁直到生成器耗尽或关闭。"""
+    """真实流式调用：返回逐 token 的生成器，持有锁直到生成器耗尽或关闭。
+
+    熔断降级 §5.9：熔断打开或运行中抛异常时，产出降级话术 token（已流出的无法撤回）。
+    """
     prompt = _build_prompt(user_message, history)
+    if not _llm_breaker.allow():
+        yield DEGRADE_MESSAGE
+        return
     _agent_lock.acquire()
     try:
         yield from _stream_final_answer(_ensure_agent(), prompt)
+    except Exception as e:  # noqa: BLE001
+        _llm_breaker.record_failure()
+        print(f"[resilience] LLM 流式调用失败，已记录熔断：{e}")
+        yield DEGRADE_MESSAGE
+    else:
+        _llm_breaker.record_success()
     finally:
         _agent_lock.release()
 
