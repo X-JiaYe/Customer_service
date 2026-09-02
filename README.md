@@ -146,6 +146,11 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 
 SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时）；断线后带 `Last-Event-ID: <最后收到的 id>` 重连即可**断点续传**（在 `SSE_STREAM_TTL_SECONDS` 窗口内从缓冲重放，不重复生成）。
 
+**Token 成本控制（§6.4）**：
+- **语义缓存**（`cache.py`）：单轮（无历史）相同问法命中缓存直接复用答案，省一次 LLM 调用。归一化（去空白/标点/大小写）后「支持哪些付款方式？」与「支持哪些付款方式！」命中同一缓存；命中时响应带 `cached: true`。缓存答案带 TTL（`CACHE_TTL_SECONDS`）。
+- **成本记账 + 预算告警**（`budget.py`）：按租户核算每小时 LLM 调用次数，超 `BUDGET_MAX_CALLS_PER_HOUR` 时降级（返回话术，不再调用 LLM），响应带 `budget_exceeded: true`。
+- 命中/超预算均有 Prometheus 指标（`cs_cache_hits_total`）。当前以「调用次数」计，精确 token 计量待接 LLM 返回元数据（见 `metrics.observe_tokens` 待办）。
+
 ## 六、API 接口
 
 | 接口 | 方法 | 请求体 | 响应 |

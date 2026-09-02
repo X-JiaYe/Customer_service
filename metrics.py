@@ -22,6 +22,8 @@ TOKENS = Counter("cs_tokens_total", "token 消耗", ["tenant"])
 KNOWLEDGE_HITS = Counter("cs_knowledge_hits_total", "知识库检索命中次数", ["tenant"])
 KNOWLEDGE_MISSES = Counter("cs_knowledge_misses_total", "知识库检索未命中次数", ["tenant"])
 UNRESOLVED = Counter("cs_unresolved_total", "未解决（低置信/拒答/转人工/降级）次数", ["tenant"])
+# Token 成本控制 §6.4：语义缓存命中（命中即省一次 LLM 调用）
+CACHE_HITS = Counter("cs_cache_hits_total", "语义缓存命中次数", ["tenant"])
 
 
 def observe_request(tenant: str, status: str) -> None:
@@ -54,6 +56,10 @@ def observe_knowledge_miss(tenant: str) -> None:
 
 def observe_unresolved(tenant: str) -> None:
     UNRESOLVED.labels(tenant).inc()
+
+
+def observe_cache_hit(tenant: str) -> None:
+    CACHE_HITS.labels(tenant).inc()
 
 
 def metrics_response() -> str:

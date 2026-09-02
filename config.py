@@ -91,6 +91,14 @@ SSE_HEARTBEAT_SECONDS = float(os.getenv("SSE_HEARTBEAT_SECONDS", "15"))
 # 断点续传缓冲 TTL（秒）：断线后在此窗口内重连可重放，超时则需重新生成
 SSE_STREAM_TTL_SECONDS = float(os.getenv("SSE_STREAM_TTL_SECONDS", "120"))
 
+# ---------- Token 成本控制（§6.4） ----------
+# 语义缓存：相同问法（归一化后）复用缓存答案，省 LLM 调用
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "1") == "1"
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+# 成本记账 + 预算告警：按租户核算每小时代价（以 LLM 调用次数计，token 精确计量待接 LLM 元数据）
+BUDGET_ENABLED = os.getenv("BUDGET_ENABLED", "1") == "1"
+BUDGET_MAX_CALLS_PER_HOUR = int(os.getenv("BUDGET_MAX_CALLS_PER_HOUR", "1000"))
+
 # ---------- 路径（绝对化，避免 cwd 差异） ----------
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
 DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())

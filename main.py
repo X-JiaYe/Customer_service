@@ -23,13 +23,22 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+import budget
+import cache
 import config  # noqa: F401
 import sse
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
 from auth import require_auth
 from feedback import classify_unresolved, record_unanswered, recent, summarize
-from metrics import observe_error, observe_latency, observe_request, observe_unresolved, metrics_response
+from metrics import (
+    observe_cache_hit,
+    observe_error,
+    observe_latency,
+    observe_request,
+    observe_unresolved,
+    metrics_response,
+)
 from security import check_output_safety, mask_pii
 from store import RedisSessionStore
 
@@ -156,6 +165,43 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
     # 补全请求上下文里的 session_id（require_auth 只设置了 tenant/request_id）
     set_request_context(tenant, request.state.request_id, req.session_id)
 
+    # 语义缓存 §6.4：单轮（无历史）相同问法直接复用缓存答案，省 LLM 调用与 token
+    cached = cache.get_answer(tenant, req.message) if not history else None
+    if cached is not None:
+        observe_cache_hit(tenant)
+        observe_request(tenant, "ok")
+        _append_turn(tenant, req.session_id, "user", req.message)
+        _append_turn(tenant, req.session_id, "assistant", cached)
+        record_audit("chat", question=req.message, answer=cached, status="ok", cached=True)
+        if not req.stream:
+            return JSONResponse(
+                {"answer": cached, "session_id": req.session_id, "tenant_id": tenant, "cached": True}
+            )
+
+        async def _cached_stream():
+            yield sse.sse_event(1, {"delta": cached})
+            yield sse.sse_event(2, {"done": True})
+
+        return StreamingResponse(_cached_stream(), media_type="text/event-stream")
+
+    # 预算告警 §6.4：超预算降级（返回话术，不再调用 LLM），避免单租户打爆配额
+    if budget.check_budget(tenant):
+        msg = "本时段调用量已达上限，请稍后再试，或转人工客服协助处理。"
+        _append_turn(tenant, req.session_id, "user", req.message)
+        _append_turn(tenant, req.session_id, "assistant", msg)
+        observe_request(tenant, "budget_exceeded")
+        record_audit("chat", question=req.message, answer=msg, status="budget_exceeded")
+        if not req.stream:
+            return JSONResponse(
+                {"answer": msg, "session_id": req.session_id, "tenant_id": tenant, "budget_exceeded": True}
+            )
+
+        async def _budget_stream():
+            yield sse.sse_event(1, {"delta": msg})
+            yield sse.sse_event(2, {"done": True})
+
+        return StreamingResponse(_budget_stream(), media_type="text/event-stream")
+
     if not req.stream:
         # 非流式：一次性返回最终答案，适合脚本/客户端简洁调用
         start = time.perf_counter()
@@ -167,7 +213,10 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
             answer = "系统繁忙，请稍后重试"
             status = "error"
             observe_error(tenant)
+        budget.record_call(tenant)
         answer = _postprocess_answer(answer)
+        if status == "ok" and not history:
+            cache.set_answer(tenant, req.message, answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
         _maybe_record_unresolved(tenant, req.message, answer)
         observe_request(tenant, status)
@@ -215,10 +264,13 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
             event_id += 1
             _stream_buffer.append(stream_key, event_id, {"delta": parts[0]})
             buf.put(("token", event_id, parts[0]))
+        budget.record_call(tenant)
         # 后处理（脱敏/持久化/审计/未命中回流），跑在请求上下文内
         answer = "".join(parts)
         if config.ENABLE_PII_MASK:
             answer = mask_pii(answer)
+        if status == "ok" and not history:
+            cache.set_answer(tenant, req.message, answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
         _maybe_record_unresolved(tenant, req.message, answer)
         observe_request(tenant, status)
