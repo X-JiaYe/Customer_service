@@ -1,0 +1,60 @@
+"""集中配置管理：从 .env 读取环境变量，提供项目级配置常量。"""
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Windows 控制台默认 GBK，强制 UTF-8 输出，避免 smolagents/rich 打印特殊字符（如 •）时崩溃
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# 加载项目根目录的 .env（无论从哪个 cwd 启动都能读到）
+load_dotenv(BASE_DIR / ".env")
+
+# ---------- DeepSeek LLM ----------
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+# smolagents 的 LiteLLMModel 通过 litellm 的 OpenAI 兼容模式接入 DeepSeek
+LITELLM_MODEL_ID = f"openai/{DEEPSEEK_MODEL}"
+
+# ---------- Embedding / Reranker 模型 ----------
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+
+# ---------- 知识库 / 检索参数 ----------
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "20"))
+RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "5"))
+# 是否启用 Reranker 重排（1=启用；0=关闭，可跳过约 2.3GB 的 reranker 模型下载）
+ENABLE_RERANKER = os.getenv("ENABLE_RERANKER", "1") == "1"
+
+# ---------- Agent ----------
+MAX_STEPS = 5
+# 已迁移到 ToolCallingAgent（模型只做原生函数调用，不执行代码），此配置已废弃保留
+EXECUTOR_TYPE = os.getenv("EXECUTOR_TYPE", "local")
+# 多轮对话注入上下文的最多轮数（每轮=用户+客服各一条）
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "10"))
+
+# ---------- 服务 / 会话 ----------
+# 启动时是否自动导入知识库（空库时生效，幂等）
+AUTO_INGEST = os.getenv("AUTO_INGEST", "1") == "1"
+# 会话空闲过期秒数（超时清理，防内存泄漏）
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
+# 单次注入 LLM 的检索结果字符上限（防上下文超长）
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
+
+# ---------- 路径（绝对化，避免 cwd 差异） ----------
+CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
+DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())
+CHROMA_COLLECTION = "customer_service_kb"
+
+# ---------- 其他 ----------
+TICKETS_FILE = str((BASE_DIR / "tickets.jsonl").resolve())

@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # ChromaDB 嵌入式运行在 app 内，持久化目录挂载出来
+      - ./knowledge/chroma_db:/app/knowledge/chroma_db
+      # 知识库文档目录
+      - ./knowledge/docs:/app/knowledge/docs
+      # HuggingFace 模型缓存（embedding + reranker）持久化，避免每次重建容器都重新下载
+      - hf_cache:/root/.cache/huggingface
+
+volumes:
+  hf_cache:

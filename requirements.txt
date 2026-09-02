@@ -1,0 +1,21 @@
+# ===== 智能客服 Agent 完整依赖（版本已按实测环境钉死，保证可复现）=====
+# 组合验证日期：2026-09-02 · Python 3.12 · 升级任一包前请回归测试
+
+# ---- Agent 框架 + LLM 接入 ----
+smolagents==1.26.0
+litellm==1.99.0
+
+# ---- RAG：向量库 / Embedding / Reranker / 检索 ----
+chromadb==1.5.9
+sentence-transformers==6.0.1   # 依赖 torch==2.13.0（ML 骨干，勿随意升级）
+FlagEmbedding==1.4.2           # bge-reranker-v2-m3 重排
+rank-bm25==0.2.2
+
+# ---- 服务层 ----
+fastapi==0.141.1
+uvicorn==0.52.4
+gradio==6.26.0
+python-dotenv==1.2.3
+
+# ---- 文档解析 ----
+pypdf==6.16.2

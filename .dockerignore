@@ -1,0 +1,24 @@
+# 密钥 / 环境（切勿打包进镜像，运行时用 env_file 注入）
+.env
+
+# Python 运行时产物
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 知识库持久化 / 运行时产物（运行期挂载 volume，不进镜像）
+knowledge/chroma_db/
+tickets.jsonl
+
+# 测试 / 临时脚本
+_*.py
+*.output
+
+# IDE / 系统
+.idea/
+.vscode/
+.git/
+.gitignore
+.DS_Store

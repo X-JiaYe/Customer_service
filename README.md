@@ -1,0 +1,213 @@
+# 智能客服 Agent
+
+基于 **LLM + RAG** 的 B2B 智能客服系统。用户提问后，Agent 自主判断意图并调用对应工具完成回答，支持四大核心能力：
+
+| 能力 | 工具 | 说明 |
+|------|------|------|
+| 知识库问答 | `knowledge_retriever` | BM25 + 向量混合检索 + Reranker 重排 |
+| 订单查询 | `query_order` | 按订单号查询（模拟数据） |
+| 工单创建 | `create_ticket` | 生成工单号，写入本地 `tickets.jsonl` |
+| 转人工 | `transfer_to_human` | 记录转人工日志并返回提示 |
+
+Agent 使用 **ToolCallingAgent**（模型只做原生函数调用、不执行代码，免代码执行沙箱风险）。
+
+---
+
+## 一、架构：前端 + 后端
+
+- **后端**：FastAPI + SSE 流式响应（`main.py`），三个接口 `/chat`、`/health`、`/knowledge/ingest`。
+- **前端（图形）**：Gradio ChatInterface，浏览器里对话，开发调试用。
+- **前端（命令行）**：`client.py`，零依赖，默认只打印最终答案。
+- **LLM**：DeepSeek（OpenAI 兼容接口，经 LiteLLM 接入）。
+- **RAG**：ChromaDB（向量）+ BM25（词法）→ 合并去重 → FlagEmbedding `bge-reranker-v2-m3` 重排。
+
+## 二、技术栈
+
+- Agent 框架：`smolagents`（ToolCallingAgent）
+- LLM：DeepSeek（`deepseek-chat`）
+- 向量库：ChromaDB（嵌入式，本地持久化）
+- Embedding：`BAAI/bge-small-zh-v1.5`
+- Reranker：`BAAI/bge-reranker-v2-m3`
+- 混合检索：`rank-bm25` + ChromaDB 向量 + FlagEmbedding 重排
+- 后端：FastAPI + Uvicorn（SSE 流式）
+- 前端：Gradio ChatInterface
+- 部署：Docker Compose
+
+## 三、项目结构
+
+```
+customer-service/
+├── main.py                 # FastAPI 入口（SSE 流式 + Gradio）
+├── agent.py                # ToolCallingAgent 初始化 + 工具注册 + 流式抽取
+├── client.py               # 命令行客户端（零依赖，减 token 输出）
+├── config.py               # 集中配置（读 .env）
+├── tools/
+│   ├── rag_retriever.py    # 混合检索工具（BM25 + 向量 + Reranker）
+│   ├── order_api.py        # 订单查询工具（模拟 API）
+│   ├── ticket_api.py       # 工单创建工具
+│   └── transfer_human.py   # 转人工工具
+├── knowledge/
+│   ├── ingest.py           # 文档导入：文件 → 分块 → Embedding → ChromaDB
+│   ├── docs/               # 知识库文档（.txt / .md / .pdf）
+│   └── chroma_db/          # ChromaDB 持久化目录（自动生成，勿手动改）
+├── tests/                  # pytest 测试
+├── requirements.txt        # 运行时依赖（版本已钉死）
+├── requirements-dev.txt    # 开发/测试依赖
+├── Dockerfile
+├── docker-compose.yml
+└── .env                    # 密钥与配置（不入库）
+```
+
+## 四、快速开始
+
+### 方式 A：本地运行（开发调试推荐）
+
+**前置条件**：Python 3.12 64-bit、DeepSeek API Key。
+
+```bash
+cd customer-service
+
+# 1) 创建虚拟环境（务必用 Python 3.12）
+python -m venv .venv
+# Windows 下之后一律用 .venv/Scripts/python.exe，避免误用系统 Python
+
+# 2) 安装依赖（国内可加 -i 换源加速）
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+
+# 3) 配置环境变量：复制 .env 并填入 DeepSeek Key
+#    （项目已含 .env 模板，把 DEEPSEEK_API_KEY 改成你的真实 key）
+
+# 4) 导入知识库（首次或文档有更新时执行）
+.venv/Scripts/python.exe -m knowledge.ingest
+
+# 5) 启动后端 API（默认端口 8000）
+.venv/Scripts/python.exe main.py --mode api
+
+# 或者启动图形界面（Gradio，浏览器打开）
+.venv/Scripts/python.exe main.py --mode gradio
+```
+
+> **注意**：必须用 `.venv/Scripts/python.exe`（Python 3.12 64-bit），系统 Python 3.9（32-bit）会因加载不了 64 位包而报错。
+
+### 方式 B：Docker 一键启动（部署推荐）
+
+```bash
+cd customer-service
+
+# 首次会构建镜像（国内已内置镜像加速：Docker Hub 镜像 + 阿里云 PyPI + CPU 版 torch）
+docker compose up -d --build
+
+# 查看健康状态
+curl http://127.0.0.1:8000/health
+# 预期返回 {"status":"ok"}
+```
+
+> **国内网络前置**：如果构建时 `registry-1.docker.io` 连接失败，需给 Docker Desktop 配置 registry 镜像（编辑 `~/.docker/daemon.json` 增加 `registry-mirrors` 后重启 Docker Desktop）。
+
+## 五、使用方式
+
+### 1. 图形界面（Gradio）
+
+启动后浏览器打开 Gradio 给的地址（默认 `http://127.0.0.1:7860`），直接对话即可。
+
+### 2. 命令行客户端（推荐脚本调用）
+
+```bash
+cd customer-service
+
+# 单轮问答（默认只打印最终答案）
+.venv/Scripts/python.exe client.py "你们的产品支持哪些支付方式？"
+
+# 多轮会话（--session 保持上下文记忆）
+.venv/Scripts/python.exe client.py "查订单 TK20250301 的状态" --session demo
+.venv/Scripts/python.exe client.py "那它的物流到哪了？" --session demo
+
+# 健康检查 / 重新导入知识库
+.venv/Scripts/python.exe client.py --health
+.venv/Scripts/python.exe client.py --ingest
+
+# 想看逐 token 流式输出时加 --stream
+.venv/Scripts/python.exe client.py "..." --stream
+```
+
+### 3. 直接调 API
+
+```bash
+# 非流式：只返回最终答案
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"你们的产品支持哪些支付方式？","stream":false}'
+
+# 流式：SSE 逐 token 推送
+curl -N -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"帮我查订单 TK20250301","stream":true}'
+```
+
+## 六、API 接口
+
+| 接口 | 方法 | 请求体 | 响应 |
+|------|------|--------|------|
+| `/health` | GET | — | `{"status":"ok"}` |
+| `/knowledge/ingest` | POST | — | `{"status":"ok","message":"..."}` |
+| `/chat` | POST | `{"message": "...", "session_id": "default", "stream": true}` | 见下 |
+
+`/chat` 响应：
+- `stream=true`（默认）：`text/event-stream`，逐 token 推送 `data: {"delta":"..."}`，结束推 `data: {"done":true}`。
+- `stream=false`：JSON `{"answer":"...","session_id":"..."}`，一次返回最终答案。
+
+## 七、配置说明（`.env` 关键项）
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `DEEPSEEK_API_KEY` | **必填**，DeepSeek API Key | — |
+| `DEEPSEEK_BASE_URL` | DeepSeek 接口地址 | `https://api.deepseek.com` |
+| `DEEPSEEK_MODEL` | 模型名 | `deepseek-chat` |
+| `EMBEDDING_MODEL` | 向量模型 | `BAAI/bge-small-zh-v1.5` |
+| `RERANKER_MODEL` | 重排模型 | `BAAI/bge-reranker-v2-m3` |
+| `ENABLE_RERANKER` | 是否启用重排（1/0） | `1` |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 分块大小 / 重叠 | `500` / `50` |
+| `RETRIEVE_TOP_K` / `RERANK_TOP_N` | 粗排数 / 精排取 N | `20` / `5` |
+| `HF_ENDPOINT` | HuggingFace 镜像（国内加速） | `https://hf-mirror.com` |
+| `HF_HUB_DISABLE_XET` | 禁用 Xet 存储（大文件走普通 HTTP，避开镜像 401） | `1` |
+
+> **Reranker 说明**：`bge-reranker-v2-m3` 约 2.3GB，首次检索才下载（国内较慢）。知识库较小时建议设 `ENABLE_RERANKER=0` 跳过，BM25+向量两路已够用；文档上量后再开启。
+
+## 八、更新知识库
+
+把新的 `.txt` / `.md` / `.pdf` 放进 `knowledge/docs/`，然后：
+
+```bash
+.venv/Scripts/python.exe -m knowledge.ingest      # 本地
+# 或
+docker compose exec app python -m knowledge.ingest # Docker 内
+```
+
+导入是**增量**的（按「文件名 + 修改时间」判断，未变化自动跳过）。
+
+## 九、测试
+
+```bash
+.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+.venv/Scripts/python.exe -m pytest -q
+```
+
+## 十、常见问题
+
+1. **系统 Python 报 `cannot import name '_imaging' from PIL`**：用了 32 位 Python 3.9，请改用 `.venv/Scripts/python.exe`（Python 3.12 64-bit）。
+2. **Docker 构建 `registry-1.docker.io` 连接失败**：国内网络需给 Docker Desktop 配 registry 镜像。
+3. **首次启动慢 / RAG 首答慢**：冷启动要加载 embedding 模型（约十几秒）；reranker 2.3GB 首次下载较慢，可先 `ENABLE_RERANKER=0`。
+4. **Windows 控制台中文乱码**：本项目已在 `config.py` / `client.py` 强制 UTF-8 输出，若仍有乱码请确认终端编码为 UTF-8。
+5. **进程退出时报 `ResourceTracker.__del__` 错误**：Windows/Python3.12 + `multiprocess` 库的已知良性噪声，不影响结果。
+6. **下载 reranker 时报 `401 Unauthorized`（`cas-server.xethub.hf.co`）**：大模型文件走 HuggingFace 的 Xet 存储，`hf-mirror.com` 不代理其 CAS 接口导致回落真实域名鉴权失败。在 `.env` 里设 `HF_HUB_DISABLE_XET=1`（项目已默认配置）即可改走普通 HTTP 下载。
+
+## 十一、验收场景
+
+启动后发送以下问题，Agent 应调用对应工具：
+
+| 问题 | 预期调用工具 |
+|------|--------------|
+| 你们的产品支持哪些支付方式？ | `knowledge_retriever` |
+| 帮我查一下订单 TK20250301 的状态 | `query_order` |
+| 我要投诉，帮我转人工 | `transfer_to_human` |
+| 帮我提一个工单，问题是页面加载很慢 | `create_ticket` |

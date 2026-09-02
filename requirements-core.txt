@@ -1,0 +1,9 @@
+# ===== 精简核心依赖（LLM + Agent + API，不含本地向量库 / Reranker）=====
+# 版本与 requirements.txt 保持一致，钉死为实测版本
+
+smolagents==1.26.0
+litellm==1.99.0
+fastapi==0.141.1
+uvicorn==0.52.4
+gradio==6.26.0
+python-dotenv==1.2.3
