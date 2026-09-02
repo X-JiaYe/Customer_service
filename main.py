@@ -25,7 +25,7 @@ from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
 from auth import require_auth
 from feedback import classify_unresolved, record_unanswered, recent, summarize
-from metrics import observe_error, observe_latency, observe_request, metrics_response
+from metrics import observe_error, observe_latency, observe_request, observe_unresolved, metrics_response
 from security import check_output_safety, mask_pii
 from store import RedisSessionStore
 
@@ -85,11 +85,12 @@ def _postprocess_answer(text: str) -> str:
     return text
 
 
-def _maybe_record_unresolved(question: str, answer: str) -> None:
+def _maybe_record_unresolved(tenant: str, question: str, answer: str) -> None:
     """未命中监控 §5.2：答案判定为「未解决」时记录，供运营补知识分析。"""
     reason = classify_unresolved(answer)
     if reason:
         record_unanswered(question, reason=reason)
+        observe_unresolved(tenant)
 
 
 class ChatRequest(BaseModel):
@@ -161,7 +162,7 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
             observe_error(tenant)
         answer = _postprocess_answer(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
-        _maybe_record_unresolved(req.message, answer)
+        _maybe_record_unresolved(tenant, req.message, answer)
         observe_request(tenant, status)
         observe_latency(tenant, time.perf_counter() - start)
         record_audit("chat", question=req.message, answer=answer, status=status)
@@ -187,7 +188,7 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
         if config.ENABLE_PII_MASK:
             answer = mask_pii(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
-        _maybe_record_unresolved(req.message, answer)
+        _maybe_record_unresolved(tenant, req.message, answer)
         observe_request(tenant, status)
         observe_latency(tenant, time.perf_counter() - start)
         record_audit("chat", question=req.message, answer=answer, status=status)

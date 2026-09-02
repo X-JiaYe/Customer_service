@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from smolagents import Tool
 
 import config
+from audit import current_context
+from metrics import observe_knowledge_hit, observe_knowledge_miss
 
 
 def tokenize(text: str) -> list[str]:
@@ -114,11 +116,17 @@ class RagRetrieverTool(Tool):
         idx = meta.get("chunk_index")
         return f"{src} 第{idx}段" if idx is not None else src
 
+    def _tenant(self) -> str:
+        """当前请求租户（供指标打标），无上下文时回落 default。"""
+        return current_context().get("tenant_id") or "default"
+
     def forward(self, query: str) -> str:
         if not self._available:
+            observe_knowledge_miss(self._tenant())
             return f"知识库检索功能未启用。{self._reason}"
 
         if not self._docs:
+            observe_knowledge_miss(self._tenant())
             return "知识库尚未导入文档，请先运行 python -m knowledge.ingest 导入。"
 
         top_k = config.RETRIEVE_TOP_K
@@ -144,6 +152,7 @@ class RagRetrieverTool(Tool):
             pass
 
         if not candidates:
+            observe_knowledge_miss(self._tenant())
             return "未在知识库中检索到相关内容。"
 
         ids = list(candidates.keys())
@@ -179,4 +188,5 @@ class RagRetrieverTool(Tool):
         # 截断超长上下文，避免叠加多轮历史后顶到 LLM 上限
         if len(result) > config.MAX_CONTEXT_CHARS:
             result = result[: config.MAX_CONTEXT_CHARS] + "\n…（内容过长已截断）"
+        observe_knowledge_hit(self._tenant())
         return result

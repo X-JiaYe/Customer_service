@@ -7,6 +7,10 @@ def test_metrics_response_contains_request_counter():
     out = metrics.metrics_response()
     assert "cs_requests_total" in out
     assert "cs_chat_latency_seconds" in out
+    # 服务指标体系 §5.5 新增指标
+    assert "cs_knowledge_hits_total" in out
+    assert "cs_knowledge_misses_total" in out
+    assert "cs_unresolved_total" in out
 
 
 def test_metrics_counters_increment():
