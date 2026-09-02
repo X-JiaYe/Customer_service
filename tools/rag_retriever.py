@@ -15,7 +15,7 @@ from smolagents import Tool
 
 import config
 from audit import current_context
-from knowledge import lifecycle
+from knowledge import context, lifecycle
 from metrics import observe_knowledge_hit, observe_knowledge_miss
 
 
@@ -78,11 +78,25 @@ class RagRetrieverTool(Tool):
                 embedding_function=get_embedding_function(),
             )
             data = self.collection.get(include=["documents", "metadatas"])
-            self._docs = data["documents"] or []
-            self._ids = data["ids"] or []
+            docs = data["documents"] or []
+            ids = data["ids"] or []
             metas = data["metadatas"] or []
-            self._meta_by_id = dict(zip(self._ids, metas)) if metas else {}
-            self._bm25 = BM25Okapi([tokenize(d) for d in self._docs]) if self._docs else None
+            self._meta_by_id = dict(zip(ids, metas)) if metas else {}
+
+            # 父子块 §5.7：分离 child（检索）与 parent（注入 LLM 的完整上下文）
+            self._child_ids, self._child_docs = [], []
+            self._parent_by_id = {}
+            for cid, doc, meta in zip(ids, docs, metas):
+                if (meta or {}).get("chunk_type") == "parent":
+                    self._parent_by_id[cid] = doc
+                else:
+                    self._child_ids.append(cid)
+                    self._child_docs.append(doc)
+
+            # 检索/BM25 只针对 child（精准）；parent 仅用于上下文扩展
+            self._docs = self._child_docs
+            self._ids = self._child_ids
+            self._bm25 = BM25Okapi([tokenize(d) for d in self._child_docs]) if self._child_docs else None
 
             # Reranker 懒加载（首次检索时才下载模型，见 _ensure_reranker）
             self._reranker = None
@@ -94,6 +108,7 @@ class RagRetrieverTool(Tool):
             self._docs = []
             self._ids = []
             self._meta_by_id = {}
+            self._parent_by_id = {}
             self._bm25 = None
             self._reranker = None
 
@@ -125,9 +140,10 @@ class RagRetrieverTool(Tool):
     def search(self, query: str) -> list[dict]:
         """纯检索：返回按相关性降序的 chunk 结果，不渲染文本、不打指标。
 
-        每项字段：id / document / source / chunk_index / score / distance
+        每项字段：id / document / source / chunk_index / score / distance / parent_id / parent_text / source_label
         - score：reranker 分数（启用且重排成功时），否则 None
         - distance：ChromaDB 向量距离（命中向量检索时），否则 None
+        - parent_id / parent_text：父子块扩展（§5.7），供 assemble_context 注入完整上下文
 
         供 forward() 渲染与 eval/rag_eval.py 评测（Recall@K / MRR）复用。
         不可用或未导入时返回 []。
@@ -146,10 +162,11 @@ class RagRetrieverTool(Tool):
             for i in ranked:
                 candidates[self._ids[i]] = self._docs[i]
 
-        # 2) 向量语义检索
+        # 2) 向量语义检索（仅 child chunk；parent 供上下文扩展，不参与检索）
         try:
             res = self.collection.query(
-                query_texts=[query], n_results=top_k, include=["documents", "distances"]
+                query_texts=[query], n_results=top_k, include=["documents", "distances"],
+                where={"chunk_type": "child"},
             )
             for cid, doc, dist in zip(res["ids"][0], res["documents"][0], res["distances"][0]):
                 candidates.setdefault(cid, doc)
@@ -191,6 +208,7 @@ class RagRetrieverTool(Tool):
         results = []
         for cid, doc, sc in zip(ids, docs, reranker_scores):
             meta = self._meta_by_id.get(cid) or {}
+            parent_id = meta.get("parent_id")
             results.append(
                 {
                     "id": cid,
@@ -199,6 +217,9 @@ class RagRetrieverTool(Tool):
                     "chunk_index": meta.get("chunk_index"),
                     "score": sc,
                     "distance": distances.get(cid),
+                    "parent_id": parent_id,
+                    "parent_text": self._parent_by_id.get(parent_id),
+                    "source_label": self._source_label(cid),
                 }
             )
         return results
@@ -223,18 +244,12 @@ class RagRetrieverTool(Tool):
         confidence = compute_confidence(scores or None, top_distance)
         low_confidence = confidence < config.RAG_CONFIDENCE_THRESHOLD
 
-        top_n = min(config.RERANK_TOP_N, len(results))
-        parts = [
-            f"【来源：{self._source_label(results[i]['id'])}】\n{results[i]['document']}"
-            for i in range(top_n)
-        ]
-        result = "\n\n".join(parts)
+        # 上下文组装 §5.7：父子块扩展 + 近重复去重 + 预算裁剪（替换硬截断）
+        top = results[: config.RERANK_TOP_N]
+        result = context.assemble_context(top, config.MAX_CONTEXT_CHARS)
 
         if low_confidence:
             result = "【低置信度】以下内容与问题可能不匹配，仅供参考，建议转人工确认。\n\n" + result
 
-        # 截断超长上下文，避免叠加多轮历史后顶到 LLM 上限
-        if len(result) > config.MAX_CONTEXT_CHARS:
-            result = result[: config.MAX_CONTEXT_CHARS] + "\n…（内容过长已截断）"
         observe_knowledge_hit(self._tenant())
         return result

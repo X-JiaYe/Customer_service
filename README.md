@@ -205,6 +205,10 @@ docker compose exec app python -m knowledge.ingest # Docker 内
 - 只有 `approved` 且未过期的知识才会进入检索；`draft`/`pending`/`deprecated` 一律过滤。
 - 每次入库追加一条 `knowledge/ingest_history.jsonl`，可用 `lifecycle.list_history(path, source)` 回溯任意文档的历史版本。
 
+### 长上下文优化（父子块 §5.7）
+
+导入时把文档切成 **child chunk**（检索用，精准）并归并为 **parent chunk**（注入 LLM 用，上下文完整，`CHUNK_PARENT_SIZE` 控制）。检索只走 child，命中的 child 会展开为 parent 完整上下文，再经**近重复去重 + 按预算裁剪**（`knowledge/context.py`）组装，替代原来的「简单拼接 + 硬截断」，避免超长文档/跨段推理时上下文被拦腰截断。
+
 ## 九、测试
 
 ```bash

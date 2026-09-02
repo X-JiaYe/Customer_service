@@ -32,6 +32,8 @@ RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 # ---------- 知识库 / 检索参数 ----------
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
+# 父子块 §5.7：child chunk 用于检索（精准），parent chunk 用于注入 LLM（上下文更完整）
+CHUNK_PARENT_SIZE = int(os.getenv("CHUNK_PARENT_SIZE", "1500"))
 RETRIEVE_TOP_K = int(os.getenv("RETRIEVE_TOP_K", "20"))
 RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "5"))
 # 是否启用 Reranker 重排（1=启用；0=关闭，可跳过约 2.3GB 的 reranker 模型下载）

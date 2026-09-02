@@ -13,8 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import chromadb
 
 import config
-from knowledge import lifecycle
+from knowledge import chunking, lifecycle
 from knowledge.embedding import get_embedding_function
+
+# 分块 / 父子块 schema 版本：变更分块逻辑时递增，强制全量重导（旧 schema 数据不兼容）
+SCHEMA_VERSION = "2"
 
 # 递归切分的分隔符优先级：段落 → 换行 → 句子 → 词 → 字符
 # 注意：不含空串 ""（str.split("") 会抛 ValueError）；字符级硬切由下方 sep is None 兜底完成
@@ -109,9 +112,10 @@ def ingest() -> None:
     for path in files:
         mtime = str(path.stat().st_mtime)
         meta = lifecycle.meta_for_source(manifest, path.name)
-        # 文件名 + 修改时间 + 生命周期元数据 一起作为增量指纹：内容或元数据（owner/状态/有效期/版本）任一变化都触发重导
+        # 文件名 + 修改时间 + 生命周期元数据 + schema 版本 一起作为增量指纹：
+        # 内容、元数据（owner/状态/有效期/版本）或分块逻辑任一变化都触发重导
         lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}"
-        source_id = hashlib.md5(f"{path.name}:{mtime}:{lifecycle_fp}".encode()).hexdigest()[:16]
+        source_id = hashlib.md5(f"{path.name}:{mtime}:{lifecycle_fp}:{SCHEMA_VERSION}".encode()).hexdigest()[:16]
 
         existing = collection.get(where={"source_id": source_id}, include=[])
         if existing["ids"]:
@@ -126,26 +130,37 @@ def ingest() -> None:
         # 删除该文件旧版本的分块，避免重复（旧版本可由 ingest_history.jsonl 回溯）
         collection.delete(where={"source": path.name})
 
-        chunks = split_text(text)
-        ids = [f"{source_id}:{i}" for i in range(len(chunks))]
+        # 父子块 §5.7：child 用于检索（精准），parent 用于注入 LLM（上下文完整）
+        child_chunks = split_text(text)
+        parents, child_to_parent = chunking.build_parent_chunks(child_chunks, config.CHUNK_PARENT_SIZE)
+
         valid_until = meta["valid_until"].isoformat() if meta["valid_until"] else ""
-        metadatas = [
-            {
-                "source": path.name,
-                "source_id": source_id,
-                "mtime": mtime,
-                "chunk_index": i,
-                "owner": meta["owner"],
-                "status": meta["status"],
-                "valid_until": valid_until,
-                "version": meta["version"],
-            }
-            for i in range(len(chunks))
-        ]
-        collection.add(ids=ids, documents=chunks, metadatas=metadatas)
-        lifecycle.record_history(history_path, path.name, meta, len(chunks), source_id, mtime)
-        total_added += len(chunks)
-        print(f"[ingest] 已导入 {path.name}：{len(chunks)} 个分块（status={meta['status']}, v{meta['version']}）")
+        base_meta = {
+            "source": path.name,
+            "source_id": source_id,
+            "mtime": mtime,
+            "owner": meta["owner"],
+            "status": meta["status"],
+            "valid_until": valid_until,
+            "version": meta["version"],
+        }
+
+        ids: list[str] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+        for i, c in enumerate(child_chunks):
+            ids.append(f"{source_id}:{i}")
+            documents.append(c)
+            metadatas.append({**base_meta, "chunk_index": i, "chunk_type": "child", "parent_id": f"{source_id}:p{child_to_parent[i]}"})
+        for pi, p in enumerate(parents):
+            ids.append(f"{source_id}:p{pi}")
+            documents.append(p)
+            metadatas.append({**base_meta, "chunk_type": "parent", "parent_id": f"{source_id}:p{pi}"})
+
+        collection.add(ids=ids, documents=documents, metadatas=metadatas)
+        total_added += len(child_chunks)
+        lifecycle.record_history(history_path, path.name, meta, len(child_chunks), source_id, mtime)
+        print(f"[ingest] 已导入 {path.name}：{len(child_chunks)} 子块 / {len(parents)} 父块（status={meta['status']}, v{meta['version']}）")
 
     print(f"[ingest] 完成，本次新增 {total_added} 个分块，集合共 {collection.count()} 条")
 
