@@ -8,19 +8,23 @@ import argparse
 import json
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 import config  # noqa: F401
 from agent import chat, chat_stream, warm_up
+from audit import record_audit, set_request_context
 from auth import require_auth
+from metrics import observe_error, observe_latency, observe_request, metrics_response
 from security import check_output_safety, mask_pii
 from store import RedisSessionStore
 
@@ -91,6 +95,12 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def metrics():
+    """Prometheus 指标端点（供抓取，与 /health 同级别不鉴权）。"""
+    return Response(metrics_response(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/knowledge/ingest")
 def knowledge_ingest(tenant: str = Depends(require_auth)):
     try:
@@ -103,24 +113,35 @@ def knowledge_ingest(tenant: str = Depends(require_auth)):
 
 
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest, tenant: str = Depends(require_auth)):
+async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depends(require_auth)):
     """对话接口：默认 SSE 逐 token 推送；stream=false 时只返回最终答案（减 token 输出）。"""
     history = _get_history(tenant, req.session_id)
+    # 补全请求上下文里的 session_id（require_auth 只设置了 tenant/request_id）
+    set_request_context(tenant, request.state.request_id, req.session_id)
 
     if not req.stream:
         # 非流式：一次性返回最终答案，适合脚本/客户端简洁调用
+        start = time.perf_counter()
         _append_turn(tenant, req.session_id, "user", req.message)
+        status = "ok"
         try:
             answer = await run_in_threadpool(chat, req.message, history)
         except Exception:  # noqa: BLE001
             answer = "系统繁忙，请稍后重试"
+            status = "error"
+            observe_error(tenant)
         answer = _postprocess_answer(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
+        observe_request(tenant, status)
+        observe_latency(tenant, time.perf_counter() - start)
+        record_audit("chat", question=req.message, answer=answer, status=status)
         return JSONResponse({"answer": answer, "session_id": req.session_id, "tenant_id": tenant})
 
     async def event_stream():
+        start = time.perf_counter()
         _append_turn(tenant, req.session_id, "user", req.message)
         answer_parts: list[str] = []
+        status = "ok"
         try:
             # 在线程池中迭代同步生成器，逐 token 异步推送；内部已加锁串行化
             async for token in iterate_in_threadpool(chat_stream(req.message, history)):
@@ -128,12 +149,17 @@ async def chat_endpoint(req: ChatRequest, tenant: str = Depends(require_auth)):
                 yield f"data: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
         except Exception:  # noqa: BLE001
             answer_parts = ["系统繁忙，请稍后重试"]
+            status = "error"
+            observe_error(tenant)
             yield f"data: {json.dumps({'delta': answer_parts[0]}, ensure_ascii=False)}\n\n"
         answer = "".join(answer_parts)
         # 已流出的 token 无法撤回（SSE 固有限制）；此处仅对持久化历史脱敏，避免 Redis 留存明文 PII
         if config.ENABLE_PII_MASK:
             answer = mask_pii(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
+        observe_request(tenant, status)
+        observe_latency(tenant, time.perf_counter() - start)
+        record_audit("chat", question=req.message, answer=answer, status=status)
         yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

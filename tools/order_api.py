@@ -1,7 +1,13 @@
 """订单查询工具（模拟 API）。"""
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from smolagents import tool
+
+from audit import record_audit
 
 # 模拟订单数据（5-10 条）
 _ORDERS = [
@@ -59,5 +65,7 @@ def query_order(order_id: str) -> str:
     """
     for order in _ORDERS:
         if order["order_id"] == order_id:
+            record_audit("query_order", order_id=order_id, found=True)
             return json.dumps(order, ensure_ascii=False, indent=2)
+    record_audit("query_order", order_id=order_id, found=False)
     return f"未找到订单 {order_id}，请确认订单号是否正确。"

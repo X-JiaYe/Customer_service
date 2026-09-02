@@ -10,6 +10,7 @@ import uuid
 from fastapi import HTTPException, Request
 
 import config
+from audit import set_request_context
 from store import get_redis
 
 
@@ -50,5 +51,7 @@ def require_auth(request: Request) -> str:
 
     request.state.tenant_id = tenant
     request.state.request_id = uuid.uuid4().hex
+    # 写入请求上下文（contextvar），供工具与审计读取 tenant/request_id
+    set_request_context(tenant, request.state.request_id)
     _check_rate_limit(request, tenant)
     return tenant

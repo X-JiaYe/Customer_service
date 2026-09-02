@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from smolagents import tool
 
 import config
+from audit import record_audit
 
 
 @tool
@@ -36,4 +37,5 @@ def create_ticket(title: str, description: str, priority: str) -> str:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     print(f"[工单] {record}")
+    record_audit("create_ticket", ticket_id=ticket_id, priority=priority)
     return f"工单创建成功，工单号：{ticket_id}（优先级：{priority}）"
