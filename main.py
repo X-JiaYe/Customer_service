@@ -21,6 +21,7 @@ from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 import config  # noqa: F401
 from agent import chat, chat_stream, warm_up
 from auth import require_auth
+from security import check_output_safety, mask_pii
 from store import RedisSessionStore
 
 
@@ -68,6 +69,17 @@ def _append_turn(tenant_id: str, session_id: str, role: str, content: str) -> No
     _session_store.append_turn(tenant_id, session_id, role, content)
 
 
+def _postprocess_answer(text: str) -> str:
+    """答案后处理：PII 脱敏 + 输出安全兜底（命中敏感承诺时附加官方口径提示）。"""
+    if not text:
+        return text
+    if config.ENABLE_PII_MASK:
+        text = mask_pii(text)
+    if check_output_safety(text):
+        text = text.rstrip() + "\n\n（注：以上信息请以官方渠道最新说明为准。）"
+    return text
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -102,6 +114,7 @@ async def chat_endpoint(req: ChatRequest, tenant: str = Depends(require_auth)):
             answer = await run_in_threadpool(chat, req.message, history)
         except Exception:  # noqa: BLE001
             answer = "系统繁忙，请稍后重试"
+        answer = _postprocess_answer(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
         return JSONResponse({"answer": answer, "session_id": req.session_id, "tenant_id": tenant})
 
@@ -117,6 +130,9 @@ async def chat_endpoint(req: ChatRequest, tenant: str = Depends(require_auth)):
             answer_parts = ["系统繁忙，请稍后重试"]
             yield f"data: {json.dumps({'delta': answer_parts[0]}, ensure_ascii=False)}\n\n"
         answer = "".join(answer_parts)
+        # 已流出的 token 无法撤回（SSE 固有限制）；此处仅对持久化历史脱敏，避免 Redis 留存明文 PII
+        if config.ENABLE_PII_MASK:
+            answer = mask_pii(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
         yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
 

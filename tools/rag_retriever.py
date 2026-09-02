@@ -3,6 +3,7 @@
 重依赖（chromadb / rank_bm25 / sentence-transformers / FlagEmbedding）采用懒加载：
 未安装时工具仍可注册，被调用时优雅降级返回提示，不阻塞 Agent 启动。
 """
+import math
 import re
 import sys
 from pathlib import Path
@@ -23,6 +24,20 @@ def tokenize(text: str) -> list[str]:
     return tokens or [text]
 
 
+def compute_confidence(scores: list[float] | None, top_distance: float | None) -> float:
+    """把检索置信度归一化到 0..1（供低置信度判定与单测）。
+
+    - 有 reranker 分数：首名 logit 走 sigmoid（0.5 为中性）。
+    - 无 reranker：用向量距离，1 - distance（归一化向量的距离近似）。
+    - 都缺失（如纯 BM25 命中）：返回 1.0，不误判为低置信度。
+    """
+    if scores:
+        return 1.0 / (1.0 + math.exp(-scores[0]))
+    if top_distance is not None:
+        return max(0.0, min(1.0, 1.0 - top_distance))
+    return 1.0
+
+
 class RagRetrieverTool(Tool):
     name = "knowledge_retriever"
     description = (
@@ -41,6 +56,7 @@ class RagRetrieverTool(Tool):
         super().__init__(**kwargs)
         self._available = False
         self._reason = ""
+        self._meta_by_id = {}  # chunk_id -> metadata（source/chunk_index，用于来源标注）
 
         try:
             import chromadb
@@ -60,6 +76,8 @@ class RagRetrieverTool(Tool):
             data = self.collection.get(include=["documents", "metadatas"])
             self._docs = data["documents"] or []
             self._ids = data["ids"] or []
+            metas = data["metadatas"] or []
+            self._meta_by_id = dict(zip(self._ids, metas)) if metas else {}
             self._bm25 = BM25Okapi([tokenize(d) for d in self._docs]) if self._docs else None
 
             # Reranker 懒加载（首次检索时才下载模型，见 _ensure_reranker）
@@ -71,6 +89,7 @@ class RagRetrieverTool(Tool):
             self._reason = f"知识库初始化失败：{e}"
             self._docs = []
             self._ids = []
+            self._meta_by_id = {}
             self._bm25 = None
             self._reranker = None
 
@@ -88,6 +107,13 @@ class RagRetrieverTool(Tool):
             self._reranker = None
         return self._reranker is not None
 
+    def _source_label(self, cid: str) -> str:
+        """从 chunk metadata 生成来源标注（文档名 + 分块序号）。"""
+        meta = self._meta_by_id.get(cid) or {}
+        src = meta.get("source") or "未知文档"
+        idx = meta.get("chunk_index")
+        return f"{src} 第{idx}段" if idx is not None else src
+
     def forward(self, query: str) -> str:
         if not self._available:
             return f"知识库检索功能未启用。{self._reason}"
@@ -97,6 +123,7 @@ class RagRetrieverTool(Tool):
 
         top_k = config.RETRIEVE_TOP_K
         candidates = {}  # chunk_id -> text
+        distances = {}   # chunk_id -> 向量距离（仅无 reranker 时用于置信度）
 
         # 1) BM25 词法检索
         if self._bm25:
@@ -108,10 +135,11 @@ class RagRetrieverTool(Tool):
         # 2) 向量语义检索
         try:
             res = self.collection.query(
-                query_texts=[query], n_results=top_k, include=["documents"]
+                query_texts=[query], n_results=top_k, include=["documents", "distances"]
             )
-            for cid, doc in zip(res["ids"][0], res["documents"][0]):
+            for cid, doc, dist in zip(res["ids"][0], res["documents"][0], res["distances"][0]):
                 candidates.setdefault(cid, doc)
+                distances[cid] = dist
         except Exception:
             pass
 
@@ -120,6 +148,7 @@ class RagRetrieverTool(Tool):
 
         ids = list(candidates.keys())
         docs = [candidates[i] for i in ids]
+        reranker_scores = None
 
         # 3) Reranker 重排（懒加载，可通过 ENABLE_RERANKER 关闭）
         if config.ENABLE_RERANKER and len(docs) > 1 and self._ensure_reranker():
@@ -131,12 +160,22 @@ class RagRetrieverTool(Tool):
                 order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
                 ids = [ids[i] for i in order]
                 docs = [docs[i] for i in order]
+                reranker_scores = [scores[i] for i in order]
             except Exception:
-                pass
+                reranker_scores = None
+
+        # 置信度：默认门槛 0.0（关闭）；开启后低于门槛 → 低置信度，建议转人工
+        top_distance = distances.get(ids[0]) if ids else None
+        confidence = compute_confidence(reranker_scores, top_distance)
+        low_confidence = confidence < config.RAG_CONFIDENCE_THRESHOLD
 
         top_n = min(config.RERANK_TOP_N, len(docs))
-        parts = [f"===== Document {i} =====\n{docs[i]}" for i in range(top_n)]
+        parts = [f"【来源：{self._source_label(ids[i])}】\n{docs[i]}" for i in range(top_n)]
         result = "\n\n".join(parts)
+
+        if low_confidence:
+            result = "【低置信度】以下内容与问题可能不匹配，仅供参考，建议转人工确认。\n\n" + result
+
         # 截断超长上下文，避免叠加多轮历史后顶到 LLM 上限
         if len(result) > config.MAX_CONTEXT_CHARS:
             result = result[: config.MAX_CONTEXT_CHARS] + "\n…（内容过长已截断）"
