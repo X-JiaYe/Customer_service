@@ -103,8 +103,12 @@ BUDGET_MAX_CALLS_PER_HOUR = int(os.getenv("BUDGET_MAX_CALLS_PER_HOUR", "1000"))
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
 DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())
 CHROMA_COLLECTION = "customer_service_kb"
-# 用户侧前端（§6.1）：轻量静态页，无构建，直接由 FastAPI 托管
-STATIC_DIR = str((BASE_DIR / "static").resolve())
+
+# ---------- 前后端分离 / 短期 token 鉴权 ----------
+# CORS 允许的来源（前端独立部署后跨域访问后端）
+CORS_ALLOWED_ORIGINS = json.loads(os.getenv("CORS_ALLOWED_ORIGINS", '["http://localhost:5173"]'))
+# 短期访问 token 的 TTL（秒）：前端登录后只用 token，长期 API Key 不进浏览器
+TOKEN_TTL_SECONDS = int(os.getenv("TOKEN_TTL_SECONDS", "7200"))
 
 # ---------- 其他 ----------
 TICKETS_FILE = str((BASE_DIR / "tickets.jsonl").resolve())

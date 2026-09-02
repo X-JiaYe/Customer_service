@@ -19,8 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -32,7 +32,7 @@ import config  # noqa: F401
 import sse
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
-from auth import require_auth, resolve_tenant
+from auth import issue_token, require_auth, resolve_tenant, resolve_token
 from feedback import classify_unresolved, record_satisfaction, record_unanswered, recent, summarize
 from metrics import (
     observe_cache_hit,
@@ -76,13 +76,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="智能客服 Agent", lifespan=lifespan)
 
-# 用户侧前端 §6.1：静态页托管在 /static，根路径直接返回聊天页
-app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
-
-
-@app.get("/")
-def index():
-    return FileResponse(Path(config.STATIC_DIR) / "index.html")
+# 前后端分离：前端独立部署后跨域访问，此处按来源白名单放行
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 会话管理：Redis 持久化（多 worker 共享、重启不丢），key = session:{tenant}:{session_id}
 _session_store = RedisSessionStore()
@@ -179,6 +180,25 @@ class ChatRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+class TokenRequest(BaseModel):
+    api_key: str = ""
+
+
+@app.post("/auth/token")
+def auth_token(req: TokenRequest, request: Request):
+    """登录换取短期访问 token §前后端分离：前端只存 token，长期 API Key 不进浏览器。"""
+    if config.API_KEYS:
+        api_key = req.api_key or request.headers.get("X-API-Key")
+        tenant = resolve_tenant(api_key)
+        if tenant is None:
+            return JSONResponse({"status": "error", "message": "无效 API Key"}, status_code=401)
+    else:
+        # 开发模式：无 API_KEYS 时签发 default 租户的 token
+        tenant = "default"
+    token = issue_token(tenant)
+    return JSONResponse({"token": token, "tenant": tenant, "expires_in": config.TOKEN_TTL_SECONDS})
 
 
 @app.get("/metrics")
@@ -377,11 +397,15 @@ async def ws_endpoint(websocket: WebSocket):
     鉴权：请求头 X-API-Key 或查询参数 api_key（浏览器无法设头时用后者）。
     当前返回完整答案（非流式）；流式逐 token 推送可复用 SSE 生产线程模式，留作后续。
     """
+    # 浏览器 WS 无法设自定义头，token 走查询参数；API Key 也兼容头/查询参数
+    token = websocket.query_params.get("token") or ""
     api_key = websocket.headers.get("X-API-Key") or websocket.query_params.get("api_key")
     if config.API_KEYS:
-        tenant = resolve_tenant(api_key)
+        tenant = resolve_token(token) if token else None
         if tenant is None:
-            await websocket.close(code=1008, reason="无效或缺失的 API Key")
+            tenant = resolve_tenant(api_key)
+        if tenant is None:
+            await websocket.close(code=1008, reason="无效或缺失的 API Key 或 token")
             return
     else:
         tenant = "default"
