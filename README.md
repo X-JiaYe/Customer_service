@@ -106,6 +106,17 @@ curl http://127.0.0.1:8000/health
 
 ## 五、使用方式
 
+### 0. 浏览器网页（用户侧前端 §6.1）
+
+启动 API 后浏览器打开 `http://127.0.0.1:8000/` 即是聊天页（`static/index.html`，轻量无构建，可直接替换为 Vue+Vite）。支持：
+
+- **流式渲染**：答案逐 token 实时显示（SSE）；
+- **引用点击**：答案末尾附「来源/参考」的行会被抽出为可点击复制块；
+- **转人工**：一键发送转人工请求（走 `transfer_to_human` 工具）；
+- **满意度**：每条答案可 👍/👎，POST 到 `/feedback` 沉淀为 `feedback:satisfaction`。
+
+网页右上角可填 `X-API-Key`（留空 = 开发模式）；会话 id 存于浏览器 `sessionStorage`，刷新保持同一会话。
+
 ### 1. 图形界面（Gradio）
 
 启动后浏览器打开 Gradio 给的地址（默认 `http://127.0.0.1:7860`），直接对话即可。
@@ -157,9 +168,11 @@ SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时
 
 | 接口 | 方法 | 请求体 | 响应 |
 |------|------|--------|------|
+| `/` | GET | — | 用户侧聊天页（`static/index.html`） |
 | `/health` | GET | — | `{"status":"ok"}` |
 | `/knowledge/ingest` | POST | — | `{"status":"ok","message":"..."}` |
 | `/chat` | POST | `{"message": "...", "session_id": "default", "stream": true}` | 见下 |
+| `/feedback` | POST | `{"rating":"up/down","session_id":"...","question":"","answer":""}` | `{"status":"ok"}` |
 | `/webhook/{channel}` | POST | 企业 IM 回调原始 payload | 平台约定回复体 |
 | `/ws` | WebSocket | `{"message":"...","session_id":"default"}` | `{"answer":"..."}` |
 

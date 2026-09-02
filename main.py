@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -32,7 +33,7 @@ import sse
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
 from auth import require_auth, resolve_tenant
-from feedback import classify_unresolved, record_unanswered, recent, summarize
+from feedback import classify_unresolved, record_satisfaction, record_unanswered, recent, summarize
 from metrics import (
     observe_cache_hit,
     observe_error,
@@ -74,6 +75,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="智能客服 Agent", lifespan=lifespan)
+
+# 用户侧前端 §6.1：静态页托管在 /static，根路径直接返回聊天页
+app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
+
+
+@app.get("/")
+def index():
+    return FileResponse(Path(config.STATIC_DIR) / "index.html")
 
 # 会话管理：Redis 持久化（多 worker 共享、重启不丢），key = session:{tenant}:{session_id}
 _session_store = RedisSessionStore()
@@ -197,6 +206,23 @@ def admin_feedback(
     else:
         data = recent(category, n=limit)
     return JSONResponse({"category": category, "count": len(data), "items": data})
+
+
+class FeedbackRequest(BaseModel):
+    rating: str  # up=👍 有帮助 / down=👎 没帮助
+    session_id: str = "default"
+    question: str = ""
+    answer: str = ""
+
+
+@app.post("/feedback")
+def feedback(req: FeedbackRequest, request: Request, tenant: str = Depends(require_auth)):
+    """满意度反馈 §6.1：用户对答案点赞/点踩，沉淀到 feedback:satisfaction 供运营分析。"""
+    if req.rating not in ("up", "down"):
+        return JSONResponse({"status": "error", "message": "rating 仅支持 up/down"}, status_code=400)
+    set_request_context(tenant, request.state.request_id, req.session_id)
+    record_satisfaction(req.rating, question=req.question, answer=req.answer)
+    return JSONResponse({"status": "ok"})
 
 
 @app.post("/knowledge/ingest")

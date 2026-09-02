@@ -103,6 +103,8 @@ BUDGET_MAX_CALLS_PER_HOUR = int(os.getenv("BUDGET_MAX_CALLS_PER_HOUR", "1000"))
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
 DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())
 CHROMA_COLLECTION = "customer_service_kb"
+# 用户侧前端（§6.1）：轻量静态页，无构建，直接由 FastAPI 托管
+STATIC_DIR = str((BASE_DIR / "static").resolve())
 
 # ---------- 其他 ----------
 TICKETS_FILE = str((BASE_DIR / "tickets.jsonl").resolve())

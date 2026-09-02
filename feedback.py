@@ -42,6 +42,13 @@ def record_transfer(reason: str) -> None:
     _push("transfer", {"reason": reason})
 
 
+def record_satisfaction(rating: str, question: str = "", answer: str = "") -> None:
+    """记录用户满意度反馈 §6.1：rating ∈ up/down（👍/👎），沉淀到 feedback:satisfaction。"""
+    if rating not in ("up", "down"):
+        return
+    _push("satisfaction", {"rating": rating, "question": question, "answer": answer})
+
+
 def _push(category: str, payload: dict) -> None:
     if not config.AUDIT_ENABLED:
         return
