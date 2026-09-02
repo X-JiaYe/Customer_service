@@ -58,6 +58,10 @@ MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # 是否记录审计日志（业务动作留痕，写 Redis）
 AUDIT_ENABLED = os.getenv("AUDIT_ENABLED", "1") == "1"
+# 审计日志保留期（秒）：§4.2 要求 ≥ 1 年（365 天），独立于会话 TTL
+AUDIT_RETENTION_SECONDS = int(os.getenv("AUDIT_RETENTION_SECONDS", str(365 * 24 * 3600)))
+# 审计防篡改 HMAC 密钥：非空时对每条审计记录签名，业务侧无密钥无法伪造；留空=不签名
+AUDIT_HMAC_KEY = os.getenv("AUDIT_HMAC_KEY", "")
 
 # ---------- 鉴权 / 多租户 / 限流 ----------
 # API_KEYS: JSON 映射 {"api_key": "tenant_id"}；为空 → 开发模式（不鉴权，tenant=default）
@@ -68,7 +72,8 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 
 # ---------- 安全兜底 ----------
 # RAG 置信度门槛：低于此值判定为「低置信度」，返回不确定 + 建议转人工，不硬编
-RAG_CONFIDENCE_THRESHOLD = float(os.getenv("RAG_CONFIDENCE_THRESHOLD", "0.0"))
+# 0 = 关闭拒答；0.5 = reranker 分数 sigmoid 中性点（正相关 >0.5、负相关 <0.5），需用评测集标定
+RAG_CONFIDENCE_THRESHOLD = float(os.getenv("RAG_CONFIDENCE_THRESHOLD", "0.5"))
 # 是否对输出做 PII 脱敏（手机号/邮箱/身份证/银行卡）
 ENABLE_PII_MASK = os.getenv("ENABLE_PII_MASK", "1") == "1"
 

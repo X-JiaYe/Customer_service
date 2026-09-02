@@ -6,6 +6,8 @@
 - get_json_logger：结构化 JSON 日志（单行、request_id 贯穿），本地开发无 Redis 也能观察。
 """
 import contextvars
+import hashlib
+import hmac
 import json
 import logging
 import time
@@ -67,6 +69,27 @@ _AUDIT_KEY = "audit:log"
 _AUDIT_MAX = 10000  # 保留最近 1 万条，避免无限膨胀
 
 
+def _sign(record: dict) -> str | None:
+    """对审计记录做 HMAC-SHA256 签名（防篡改），未配置密钥返回 None。"""
+    if not config.AUDIT_HMAC_KEY:
+        return None
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    return hmac.new(
+        config.AUDIT_HMAC_KEY.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def verify_audit(record: dict) -> bool:
+    """校验审计记录签名（防篡改）；未配置签名密钥时恒 True（未启用签名）。"""
+    if not config.AUDIT_HMAC_KEY or not isinstance(record, dict):
+        return not config.AUDIT_HMAC_KEY
+    sig = record.get("sig")
+    if not sig:
+        return False
+    body = {k: v for k, v in record.items() if k != "sig"}
+    return hmac.compare_digest(sig, _sign(body) or "")
+
+
 def record_audit(action: str, **fields) -> None:
     """写一条审计记录到 Redis（audit:log），Redis 不可用则降级为仅结构化日志。"""
     if not config.AUDIT_ENABLED:
@@ -81,13 +104,17 @@ def record_audit(action: str, **fields) -> None:
         "action": action,
     }
     record.update(fields)
+    sig = _sign(record)
+    if sig:
+        record["sig"] = sig  # 防篡改签名（§4.2）
 
     try:
         r = get_redis()
         pipe = r.pipeline()
         pipe.lpush(_AUDIT_KEY, json.dumps(record, ensure_ascii=False))
         pipe.ltrim(_AUDIT_KEY, 0, _AUDIT_MAX - 1)
-        pipe.expire(_AUDIT_KEY, config.SESSION_TTL_SECONDS * 24)
+        # 保留期 ≥ 1 年（§4.2），独立于会话 TTL
+        pipe.expire(_AUDIT_KEY, config.AUDIT_RETENTION_SECONDS)
         pipe.execute()
     except Exception as e:  # noqa: BLE001
         print(f"[audit] Redis 不可用，审计仅输出日志：{e}")
