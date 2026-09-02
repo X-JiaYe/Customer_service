@@ -17,7 +17,7 @@ from knowledge import chunking, lifecycle
 from knowledge.embedding import get_embedding_function
 
 # 分块 / 父子块 schema 版本：变更分块逻辑时递增，强制全量重导（旧 schema 数据不兼容）
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 # 递归切分的分隔符优先级：段落 → 换行 → 句子 → 词 → 字符
 # 注意：不含空串 ""（str.split("") 会抛 ValueError）；字符级硬切由下方 sep is None 兜底完成
@@ -99,6 +99,12 @@ def ingest() -> None:
         embedding_function=get_embedding_function(),
     )
 
+    # 迁移：旧 schema（分块无 tenant_id）一次性清空重建，保证多租户隔离字段齐全
+    existing = collection.get(include=["metadatas"])
+    if existing["ids"] and any((m or {}).get("tenant_id") is None for m in existing["metadatas"]):
+        collection.delete(ids=existing["ids"])
+        print("[ingest] 检测到旧 schema（缺 tenant_id），已清空，即将按多租户重导")
+
     files = list(_iter_docs(docs_dir))
     if not files:
         print(f"[ingest] 未在 {docs_dir} 下找到任何 .txt/.md/.pdf 文档")
@@ -114,7 +120,8 @@ def ingest() -> None:
         meta = lifecycle.meta_for_source(manifest, path.name)
         # 文件名 + 修改时间 + 生命周期元数据 + schema 版本 一起作为增量指纹：
         # 内容、元数据（owner/状态/有效期/版本）或分块逻辑任一变化都触发重导
-        lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}"
+        tenant = meta["tenant"]
+        lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}|{tenant}"
         source_id = hashlib.md5(f"{path.name}:{mtime}:{lifecycle_fp}:{SCHEMA_VERSION}".encode()).hexdigest()[:16]
 
         existing = collection.get(where={"source_id": source_id}, include=[])
@@ -127,8 +134,8 @@ def ingest() -> None:
             print(f"[ingest] 跳过（空文件）：{path.name}")
             continue
 
-        # 删除该文件旧版本的分块，避免重复（旧版本可由 ingest_history.jsonl 回溯）
-        collection.delete(where={"source": path.name})
+        # 删除该文件旧版本的分块（按 文档名+租户 精确删，跨租户同名文档不误删）
+        collection.delete(where={"source": path.name, "tenant_id": tenant})
 
         # 父子块 §5.7：child 用于检索（精准），parent 用于注入 LLM（上下文完整）
         child_chunks = split_text(text)
@@ -143,6 +150,7 @@ def ingest() -> None:
             "status": meta["status"],
             "valid_until": valid_until,
             "version": meta["version"],
+            "tenant_id": tenant,
         }
 
         ids: list[str] = []

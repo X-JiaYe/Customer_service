@@ -97,6 +97,8 @@ class RagRetrieverTool(Tool):
             self._docs = self._child_docs
             self._ids = self._child_ids
             self._bm25 = BM25Okapi([tokenize(d) for d in self._child_docs]) if self._child_docs else None
+            # 多租户隔离：按 tenant 懒构建 BM25（key=tenant → (ids, docs, bm25)）
+            self._bm25_cache: dict = {}
 
             # Reranker 懒加载（首次检索时才下载模型，见 _ensure_reranker）
             self._reranker = None
@@ -110,6 +112,7 @@ class RagRetrieverTool(Tool):
             self._meta_by_id = {}
             self._parent_by_id = {}
             self._bm25 = None
+            self._bm25_cache = {}
             self._reranker = None
 
     def _ensure_reranker(self) -> bool:
@@ -137,6 +140,26 @@ class RagRetrieverTool(Tool):
         """当前请求租户（供指标打标），无上下文时回落 default。"""
         return current_context().get("tenant_id") or "default"
 
+    def _tenant_children(self, tenant: str) -> tuple[list, list, object]:
+        """按租户返回 child 的 (ids, docs, bm25)，懒构建并缓存。
+
+        多租户隔离关键点：BM25 索引按 tenant 拆分，检索只在本租户范围内召回，
+        从根上杜绝跨租户串扰（§4.1 租户级隔离）。
+        """
+        from rank_bm25 import BM25Okapi
+
+        cached = self._bm25_cache.get(tenant)
+        if cached is not None:
+            return cached
+        ids, docs = [], []
+        for cid, doc in zip(self._child_ids, self._child_docs):
+            if (self._meta_by_id.get(cid) or {}).get("tenant_id", "default") == tenant:
+                ids.append(cid)
+                docs.append(doc)
+        bm25 = BM25Okapi([tokenize(d) for d in docs]) if docs else None
+        self._bm25_cache[tenant] = (ids, docs, bm25)
+        return self._bm25_cache[tenant]
+
     def search(self, query: str) -> list[dict]:
         """纯检索：返回按相关性降序的 chunk 结果，不渲染文本、不打指标。
 
@@ -155,18 +178,22 @@ class RagRetrieverTool(Tool):
         candidates = {}  # chunk_id -> text
         distances = {}   # chunk_id -> 向量距离（仅无 reranker 时用于置信度）
 
-        # 1) BM25 词法检索
-        if self._bm25:
-            scores = self._bm25.get_scores(tokenize(query))
+        # 多租户隔离：只在本租户范围内召回（BM25 与向量都按 tenant 过滤）
+        tenant = self._tenant()
+        t_ids, t_docs, t_bm25 = self._tenant_children(tenant)
+
+        # 1) BM25 词法检索（仅当前租户的 child）
+        if t_bm25:
+            scores = t_bm25.get_scores(tokenize(query))
             ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
             for i in ranked:
-                candidates[self._ids[i]] = self._docs[i]
+                candidates[t_ids[i]] = t_docs[i]
 
-        # 2) 向量语义检索（仅 child chunk；parent 供上下文扩展，不参与检索）
+        # 2) 向量语义检索（仅 child chunk，且按 tenant 隔离）
         try:
             res = self.collection.query(
                 query_texts=[query], n_results=top_k, include=["documents", "distances"],
-                where={"chunk_type": "child"},
+                where={"chunk_type": "child", "tenant_id": tenant},
             )
             for cid, doc, dist in zip(res["ids"][0], res["documents"][0], res["distances"][0]):
                 candidates.setdefault(cid, doc)
