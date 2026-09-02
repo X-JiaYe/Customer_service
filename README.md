@@ -209,6 +209,17 @@ docker compose exec app python -m knowledge.ingest # Docker 内
 
 导入时把文档切成 **child chunk**（检索用，精准）并归并为 **parent chunk**（注入 LLM 用，上下文完整，`CHUNK_PARENT_SIZE` 控制）。检索只走 child，命中的 child 会展开为 parent 完整上下文，再经**近重复去重 + 按预算裁剪**（`knowledge/context.py`）组装，替代原来的「简单拼接 + 硬截断」，避免超长文档/跨段推理时上下文被拦腰截断。
 
+### 备份与容灾（§5.8）
+
+- 知识库（ChromaDB）持久化在 `knowledge/chroma_db/`（Docker 内已 bind mount 到宿主机）；Redis 会话/审计开启 **AOF 持久化**，异常宕机最多丢 1 秒写。
+- 快照 / 恢复 / 重建（`python -m knowledge.backup --help`）：
+  ```bash
+  .venv/Scripts/python.exe -m knowledge.backup --backup                 # 快照向量库
+  .venv/Scripts/python.exe -m knowledge.backup --restore backup/<快照>   # 回滚
+  .venv/Scripts/python.exe -m knowledge.backup --rebuild                # 从 docs 全量重导（灾难恢复兜底）
+  .venv/Scripts/python.exe -m knowledge.backup --verify                 # 恢复后自检
+  ```
+
 ## 九、测试
 
 ```bash

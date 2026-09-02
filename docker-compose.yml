@@ -20,6 +20,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    # AOF 持久化 §5.8：everysec 落盘，异常宕机最多丢 1 秒写，避免会话/审计全丢
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     # 暴露到宿主机 6379：本地开发（app 跑在宿主机、redis 跑容器）时连接 localhost:6379
     ports:
       - "6379:6379"
