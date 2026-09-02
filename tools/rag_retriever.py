@@ -193,7 +193,7 @@ class RagRetrieverTool(Tool):
         try:
             res = self.collection.query(
                 query_texts=[query], n_results=top_k, include=["documents", "distances"],
-                where={"chunk_type": "child", "tenant_id": tenant},
+                where={"$and": [{"chunk_type": "child"}, {"tenant_id": tenant}]},
             )
             for cid, doc, dist in zip(res["ids"][0], res["documents"][0], res["distances"][0]):
                 candidates.setdefault(cid, doc)

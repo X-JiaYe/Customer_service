@@ -135,7 +135,7 @@ def ingest() -> None:
             continue
 
         # 删除该文件旧版本的分块（按 文档名+租户 精确删，跨租户同名文档不误删）
-        collection.delete(where={"source": path.name, "tenant_id": tenant})
+        collection.delete(where={"$and": [{"source": path.name}, {"tenant_id": tenant}]})
 
         # 父子块 §5.7：child 用于检索（精准），parent 用于注入 LLM（上下文完整）
         child_chunks = split_text(text)
