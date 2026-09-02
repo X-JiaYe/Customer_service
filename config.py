@@ -85,6 +85,12 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "3"))
 CIRCUIT_RESET_SECONDS = float(os.getenv("CIRCUIT_RESET_SECONDS", "60"))
 
+# ---------- 流式断线重连（§6.3） ----------
+# SSE 心跳间隔（秒）：长回答期间无 token 产出时发送注释行，防代理空闲超时
+SSE_HEARTBEAT_SECONDS = float(os.getenv("SSE_HEARTBEAT_SECONDS", "15"))
+# 断点续传缓冲 TTL（秒）：断线后在此窗口内重连可重放，超时则需重新生成
+SSE_STREAM_TTL_SECONDS = float(os.getenv("SSE_STREAM_TTL_SECONDS", "120"))
+
 # ---------- 路径（绝对化，避免 cwd 差异） ----------
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
 DOCS_DIR = str((BASE_DIR / "knowledge" / "docs").resolve())

@@ -5,7 +5,10 @@
     python main.py --mode gradio   # 启动 Gradio ChatInterface
 """
 import argparse
+import asyncio
+import contextvars
 import json
+import queue
 import sys
 import threading
 import time
@@ -18,9 +21,10 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
-from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
+from starlette.concurrency import run_in_threadpool
 
 import config  # noqa: F401
+import sse
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
 from auth import require_auth
@@ -62,6 +66,9 @@ app = FastAPI(title="智能客服 Agent", lifespan=lifespan)
 
 # 会话管理：Redis 持久化（多 worker 共享、重启不丢），key = session:{tenant}:{session_id}
 _session_store = RedisSessionStore()
+
+# 流式断点续传缓冲 §6.3：按 (tenant:session_id) 缓存已产出的 SSE 事件，断线重连后重放尾部
+_stream_buffer = sse.StreamBuffer()
 
 
 def _get_history(tenant_id: str, session_id: str) -> list[dict]:
@@ -168,23 +175,48 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
         record_audit("chat", question=req.message, answer=answer, status=status)
         return JSONResponse({"answer": answer, "session_id": req.session_id, "tenant_id": tenant})
 
-    async def event_stream():
-        start = time.perf_counter()
-        _append_turn(tenant, req.session_id, "user", req.message)
-        answer_parts: list[str] = []
+    # 断点续传 §6.3：客户端带 Last-Event-ID 重连时，从缓冲重放尾部，不重复生成
+    stream_key = f"{tenant}:{req.session_id}"
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id is not None:
+        try:
+            from_id = int(last_event_id)
+        except ValueError:
+            from_id = 0
+        replay = _stream_buffer.replay(stream_key, from_id)
+        if replay is not None:
+            async def _replay_stream():
+                for eid, payload in replay:
+                    yield sse.sse_event(eid, payload)
+
+            return StreamingResponse(_replay_stream(), media_type="text/event-stream")
+
+    _stream_buffer.new(stream_key)
+    start = time.perf_counter()
+    _append_turn(tenant, req.session_id, "user", req.message)
+
+    # 生产线程：跑 LLM 流 + 后处理，独立于客户端是否在线（保证会话/审计落地、缓冲可重放）
+    buf: queue.Queue = queue.Queue()
+
+    def _producer() -> None:
+        event_id = 0
+        parts: list[str] = []
         status = "ok"
         try:
-            # 在线程池中迭代同步生成器，逐 token 异步推送；内部已加锁串行化
-            async for token in iterate_in_threadpool(chat_stream(req.message, history)):
-                answer_parts.append(token)
-                yield f"data: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
+            for token in chat_stream(req.message, history):
+                parts.append(token)
+                event_id += 1
+                _stream_buffer.append(stream_key, event_id, {"delta": token})
+                buf.put(("token", event_id, token))
         except Exception:  # noqa: BLE001
-            answer_parts = ["系统繁忙，请稍后重试"]
+            parts = ["系统繁忙，请稍后重试"]
             status = "error"
             observe_error(tenant)
-            yield f"data: {json.dumps({'delta': answer_parts[0]}, ensure_ascii=False)}\n\n"
-        answer = "".join(answer_parts)
-        # 已流出的 token 无法撤回（SSE 固有限制）；此处仅对持久化历史脱敏，避免 Redis 留存明文 PII
+            event_id += 1
+            _stream_buffer.append(stream_key, event_id, {"delta": parts[0]})
+            buf.put(("token", event_id, parts[0]))
+        # 后处理（脱敏/持久化/审计/未命中回流），跑在请求上下文内
+        answer = "".join(parts)
         if config.ENABLE_PII_MASK:
             answer = mask_pii(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
@@ -192,7 +224,28 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
         observe_request(tenant, status)
         observe_latency(tenant, time.perf_counter() - start)
         record_audit("chat", question=req.message, answer=answer, status=status)
-        yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
+        event_id += 1
+        _stream_buffer.append(stream_key, event_id, {"done": True})
+        _stream_buffer.finish(stream_key)
+        buf.put(("done", event_id, None))
+
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(_producer), daemon=True).start()
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                kind, eid, payload = await loop.run_in_executor(
+                    None, buf.get, True, config.SSE_HEARTBEAT_SECONDS
+                )
+            except queue.Empty:
+                yield sse.PING  # 心跳：长回答期间防空闲超时
+                continue
+            if kind == "done":
+                yield sse.sse_event(eid, {"done": True})
+                break
+            yield sse.sse_event(eid, {"delta": payload})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

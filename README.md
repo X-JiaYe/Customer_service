@@ -144,6 +144,8 @@ curl -N -X POST http://127.0.0.1:8000/chat \
   -d '{"message":"帮我查订单 TK20250301","stream":true}'
 ```
 
+SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时）；断线后带 `Last-Event-ID: <最后收到的 id>` 重连即可**断点续传**（在 `SSE_STREAM_TTL_SECONDS` 窗口内从缓冲重放，不重复生成）。
+
 ## 六、API 接口
 
 | 接口 | 方法 | 请求体 | 响应 |
