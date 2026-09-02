@@ -6,6 +6,7 @@
 import math
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -14,6 +15,7 @@ from smolagents import Tool
 
 import config
 from audit import current_context
+from knowledge import lifecycle
 from metrics import observe_knowledge_hit, observe_knowledge_miss
 
 
@@ -155,6 +157,16 @@ class RagRetrieverTool(Tool):
         except Exception:
             pass
 
+        if not candidates:
+            return []
+
+        # 生命周期治理 §5.1：剔除未发布（draft/pending/deprecated）或已过期的知识
+        today = date.today()
+        candidates = {
+            cid: doc
+            for cid, doc in candidates.items()
+            if lifecycle.is_retrievable(lifecycle.normalize_meta(self._meta_by_id.get(cid) or {}), today)
+        }
         if not candidates:
             return []
 

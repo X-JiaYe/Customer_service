@@ -12,6 +12,7 @@ venv/
 # 知识库 / 运行时产物
 knowledge/chroma_db/
 knowledge/docs/*.pdf
+knowledge/ingest_history.jsonl
 tickets.jsonl
 
 # IDE / 系统

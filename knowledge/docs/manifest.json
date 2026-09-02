@@ -1,0 +1,17 @@
+{
+  "FAQ_常见问题与售后服务.md": {
+    "owner": "客服运营组",
+    "status": "approved",
+    "version": "1.2.0"
+  },
+  "产品手册_物联网智能网关GW200.md": {
+    "owner": "硬件产品部",
+    "status": "approved",
+    "version": "2.0.0"
+  },
+  "用户指南_温湿度传感器节点TH100.md": {
+    "owner": "硬件产品部",
+    "status": "approved",
+    "version": "1.1.0"
+  }
+}

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import chromadb
 
 import config
+from knowledge import lifecycle
 from knowledge.embedding import get_embedding_function
 
 # 递归切分的分隔符优先级：段落 → 换行 → 句子 → 词 → 字符
@@ -100,11 +101,17 @@ def ingest() -> None:
         print(f"[ingest] 未在 {docs_dir} 下找到任何 .txt/.md/.pdf 文档")
         return
 
+    # 生命周期治理 §5.1：读 manifest 元数据 + 版本回溯历史（写 knowledge/ 下，避免被当作文档扫描）
+    manifest = lifecycle.load_manifest(docs_dir)
+    history_path = docs_dir.parent / lifecycle.HISTORY_NAME
+
     total_added = 0
     for path in files:
         mtime = str(path.stat().st_mtime)
-        # 文件名 + 修改时间 作为增量判断依据
-        source_id = hashlib.md5(f"{path.name}:{mtime}".encode()).hexdigest()[:16]
+        meta = lifecycle.meta_for_source(manifest, path.name)
+        # 文件名 + 修改时间 + 生命周期元数据 一起作为增量指纹：内容或元数据（owner/状态/有效期/版本）任一变化都触发重导
+        lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}"
+        source_id = hashlib.md5(f"{path.name}:{mtime}:{lifecycle_fp}".encode()).hexdigest()[:16]
 
         existing = collection.get(where={"source_id": source_id}, include=[])
         if existing["ids"]:
@@ -116,18 +123,29 @@ def ingest() -> None:
             print(f"[ingest] 跳过（空文件）：{path.name}")
             continue
 
-        # 删除该文件旧版本的分块，避免重复
+        # 删除该文件旧版本的分块，避免重复（旧版本可由 ingest_history.jsonl 回溯）
         collection.delete(where={"source": path.name})
 
         chunks = split_text(text)
         ids = [f"{source_id}:{i}" for i in range(len(chunks))]
+        valid_until = meta["valid_until"].isoformat() if meta["valid_until"] else ""
         metadatas = [
-            {"source": path.name, "source_id": source_id, "mtime": mtime, "chunk_index": i}
+            {
+                "source": path.name,
+                "source_id": source_id,
+                "mtime": mtime,
+                "chunk_index": i,
+                "owner": meta["owner"],
+                "status": meta["status"],
+                "valid_until": valid_until,
+                "version": meta["version"],
+            }
             for i in range(len(chunks))
         ]
         collection.add(ids=ids, documents=chunks, metadatas=metadatas)
+        lifecycle.record_history(history_path, path.name, meta, len(chunks), source_id, mtime)
         total_added += len(chunks)
-        print(f"[ingest] 已导入 {path.name}：{len(chunks)} 个分块")
+        print(f"[ingest] 已导入 {path.name}：{len(chunks)} 个分块（status={meta['status']}, v{meta['version']}）")
 
     print(f"[ingest] 完成，本次新增 {total_added} 个分块，集合共 {collection.count()} 条")
 

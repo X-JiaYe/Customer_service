@@ -183,7 +183,27 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 docker compose exec app python -m knowledge.ingest # Docker 内
 ```
 
-导入是**增量**的（按「文件名 + 修改时间」判断，未变化自动跳过）。
+导入是**增量**的（按「文件名 + 修改时间 + 生命周期元数据」判断，未变化自动跳过）。
+
+### 知识生命周期治理（§5.1）
+
+`knowledge/docs/manifest.json` 声明每个文档的生命周期元数据（未声明的走默认值：已发布 / 永不过期 / 无 owner / v1.0.0）：
+
+```json
+{
+  "FAQ_常见问题与售后服务.md": {
+    "owner": "客服运营组",
+    "status": "approved",
+    "valid_until": "2027-12-31",
+    "version": "1.2.0"
+  }
+}
+```
+
+- `status`：`draft`（草稿）→ `pending`（待审）→ `approved`（已发布）→ `deprecated`（已下架）。
+- `valid_until`：ISO 日期，到期后自动**不再被检索**（到期下架）。
+- 只有 `approved` 且未过期的知识才会进入检索；`draft`/`pending`/`deprecated` 一律过滤。
+- 每次入库追加一条 `knowledge/ingest_history.jsonl`，可用 `lifecycle.list_history(path, source)` 回溯任意文档的历史版本。
 
 ## 九、测试
 
