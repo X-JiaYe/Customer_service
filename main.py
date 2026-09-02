@@ -24,6 +24,7 @@ import config  # noqa: F401
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
 from auth import require_auth
+from feedback import classify_unresolved, record_unanswered, recent, summarize
 from metrics import observe_error, observe_latency, observe_request, metrics_response
 from security import check_output_safety, mask_pii
 from store import RedisSessionStore
@@ -84,6 +85,13 @@ def _postprocess_answer(text: str) -> str:
     return text
 
 
+def _maybe_record_unresolved(question: str, answer: str) -> None:
+    """未命中监控 §5.2：答案判定为「未解决」时记录，供运营补知识分析。"""
+    reason = classify_unresolved(answer)
+    if reason:
+        record_unanswered(question, reason=reason)
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -99,6 +107,27 @@ def health():
 def metrics():
     """Prometheus 指标端点（供抓取，与 /health 同级别不鉴权）。"""
     return Response(metrics_response(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/admin/feedback")
+def admin_feedback(
+    category: str = "unanswered",
+    limit: int = 20,
+    summarize: bool = False,
+    tenant: str = Depends(require_auth),
+):
+    """未命中/转人工反馈查询（§5.2/5.3）：供运营补知识与自动化解率分析。
+
+    category: unanswered（未命中问题）| transfer（转人工原因）
+    summarize=true 时返回高频 Top 榜，否则返回最近 limit 条。
+    """
+    if category not in {"unanswered", "transfer"}:
+        return JSONResponse({"status": "error", "message": "category 仅支持 unanswered / transfer"}, status_code=400)
+    if summarize:
+        data = summarize(category, top_n=limit)
+    else:
+        data = recent(category, n=limit)
+    return JSONResponse({"category": category, "count": len(data), "items": data})
 
 
 @app.post("/knowledge/ingest")
@@ -132,6 +161,7 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
             observe_error(tenant)
         answer = _postprocess_answer(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
+        _maybe_record_unresolved(req.message, answer)
         observe_request(tenant, status)
         observe_latency(tenant, time.perf_counter() - start)
         record_audit("chat", question=req.message, answer=answer, status=status)
@@ -157,6 +187,7 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
         if config.ENABLE_PII_MASK:
             answer = mask_pii(answer)
         _append_turn(tenant, req.session_id, "assistant", answer)
+        _maybe_record_unresolved(req.message, answer)
         observe_request(tenant, status)
         observe_latency(tenant, time.perf_counter() - start)
         record_audit("chat", question=req.message, answer=answer, status=status)
