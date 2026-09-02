@@ -7,6 +7,7 @@
 import argparse
 import json
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +20,20 @@ from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 import config  # noqa: F401
-from agent import chat, chat_stream
+from agent import chat, chat_stream, warm_up
+
+
+def _warm_up_in_background() -> None:
+    """后台预热模型（embedding + ChromaDB + reranker），避免首条消息冷启动。"""
+
+    def _run():
+        try:
+            warm_up()
+            print("[warmup] 模型预热完成")
+        except Exception as e:  # noqa: BLE001
+            print(f"[warmup] 预热失败（不影响服务，首条消息将冷启动）：{e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @asynccontextmanager
@@ -32,6 +46,8 @@ async def lifespan(app: FastAPI):
             ingest()
         except Exception as e:  # noqa: BLE001
             print(f"[startup] 自动导入知识库失败（可稍后调用 /knowledge/ingest 重试）：{e}")
+    # 后台预热模型，避免首条消息冷启动（embedding + ChromaDB + reranker）
+    _warm_up_in_background()
     yield
 
 
@@ -147,7 +163,13 @@ def run_gradio():
         except Exception:  # noqa: BLE001
             return "系统繁忙，请稍后重试"
 
-    gr.ChatInterface(fn=respond, title="智能客服 Agent").launch()
+    # 启动前后台预热模型，避免首条消息冷启动
+    _warm_up_in_background()
+    gr.ChatInterface(
+        fn=respond,
+        title="智能客服 Agent",
+        save_history=True,  # 历史对话存浏览器 localStorage，刷新/切会话不丢
+    ).launch()
 
 
 def main():
