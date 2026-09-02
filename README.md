@@ -164,6 +164,49 @@ SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时
 
 **多渠道接入（§6.2）**：`channels/` 定义跨渠道统一消息模型（`Message`）与企业 IM 适配器（企业微信 / 钉钉 / 飞书的回调解析与回复格式化），agent 核心不感知渠道差异。REST `/chat`、Webhook `/webhook/{channel}`、WebSocket `/ws` 三条通道共用同一套会话/缓存/预算/审计逻辑（`_try_fast_path` + `_process_message`）。企业 IM 的**签名校验**留接口 `channels.webhook.verify_signature`（当前开发模式放行，生产按平台 secret 补齐）。
 
+### 4. 多租户（租户机器人）
+
+项目支持**多租户知识隔离**：每个租户持有一把独立 API Key，登录后只能检索「本租户专属知识 + 全局共享知识」，跨租户知识不可见。
+
+#### 租户 ↔ API Key 对照
+
+| API Key | 租户 | 可见知识 |
+|---|---|---|
+| `sk-local-dev` | `default`（开发/默认） | 共享知识（FAQ / 产品手册 / 用户指南） |
+| `sk-huayuan` | `tenant_a`（华远科技） | 共享知识 + 《华远科技_园区安防方案》 |
+| `sk-lanjing` | `tenant_b`（蓝鲸制造） | 共享知识 + 《蓝鲸制造_产线维保手册》 |
+
+#### 用不同租户身份调用
+
+```bash
+# 华远科技（tenant_a）：问门禁/安防，命中专属方案
+.venv/Scripts/python.exe client.py "门禁访客预约怎么操作？" --api-key sk-huayuan
+
+# 蓝鲸制造（tenant_b）：问维保/备件，命中专属手册
+.venv/Scripts/python.exe client.py "冲压线多久巡检一次？" --api-key sk-lanjing
+
+# 用 A 租户的 key 问 B 租户的内容 → 只回共享知识，不泄露蓝鲸
+.venv/Scripts/python.exe client.py "产线设备维保巡检" --api-key sk-huayuan
+```
+
+```bash
+# 直接调 API 同理，带 X-API-Key 头
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: sk-huayuan" \
+  -d '{"message":"门禁访客预约怎么操作？","stream":false}'
+```
+
+前端登录页填对应 API Key 即可（网页右上角 `X-API-Key`，留空 = 开发模式 `default`）。
+
+#### 新增一个租户
+
+1. 在 `knowledge/docs/` 放该租户的专属文档，并在 `manifest.json` 里给它加 `"tenant": "tenant_x"`。
+2. 在 `.env` 的 `API_KEYS` 里加一条映射 `"sk-xxx":"tenant_x"`。
+3. 重新导入：`.venv/Scripts/python.exe -m knowledge.ingest`。
+
+> 不带 `tenant` 的文档 = **共享知识**，对所有租户可见；`tenant` 指定的文档仅该租户可见。
+
 ## 六、API 接口
 
 | 接口 | 方法 | 请求体 | 响应 |
@@ -224,12 +267,19 @@ docker compose exec app python -m knowledge.ingest # Docker 内
     "status": "approved",
     "valid_until": "2027-12-31",
     "version": "1.2.0"
+  },
+  "华远科技_园区安防方案.md": {
+    "owner": "华远科技",
+    "status": "approved",
+    "version": "1.0.0",
+    "tenant": "tenant_a"
   }
 }
 ```
 
 - `status`：`draft`（草稿）→ `pending`（待审）→ `approved`（已发布）→ `deprecated`（已下架）。
 - `valid_until`：ISO 日期，到期后自动**不再被检索**（到期下架）。
+- `tenant`：可选，多租户专属文档的归属租户；缺省 = **共享知识**（所有租户可见）。详见「五、使用方式 → 4. 多租户」。
 - 只有 `approved` 且未过期的知识才会进入检索；`draft`/`pending`/`deprecated` 一律过滤。
 - 每次入库追加一条 `knowledge/ingest_history.jsonl`，可用 `lifecycle.list_history(path, source)` 回溯任意文档的历史版本。
 
