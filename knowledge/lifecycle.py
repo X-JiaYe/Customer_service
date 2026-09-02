@@ -21,7 +21,8 @@ MANIFEST_NAME = "manifest.json"
 HISTORY_NAME = "ingest_history.jsonl"
 
 # 未在 manifest.json 中声明的文档，用安全默认值（已发布、永不过期、无 owner、版本 1.0.0）
-DEFAULT_META = {"owner": "", "status": STATUS_APPROVED, "valid_until": None, "version": "1.0.0", "tenant": "default"}
+# tenant 默认 "shared" = 共享知识（所有租户可见）；显式声明 tenant 即为该租户专属
+DEFAULT_META = {"owner": "", "status": STATUS_APPROVED, "valid_until": None, "version": "1.0.0", "tenant": "shared"}
 
 
 def parse_date(s: str | None) -> date | None:

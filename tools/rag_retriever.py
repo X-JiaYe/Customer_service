@@ -143,8 +143,8 @@ class RagRetrieverTool(Tool):
     def _tenant_children(self, tenant: str) -> tuple[list, list, object]:
         """按租户返回 child 的 (ids, docs, bm25)，懒构建并缓存。
 
-        多租户隔离关键点：BM25 索引按 tenant 拆分，检索只在本租户范围内召回，
-        从根上杜绝跨租户串扰（§4.1 租户级隔离）。
+        多租户隔离关键点：BM25 索引按 tenant 拆分，检索返回「本租户专属 + shared 共享」，
+        隔离其他租户的专属文档，从根上杜绝跨租户串扰（§4.1 租户级隔离）。
         """
         from rank_bm25 import BM25Okapi
 
@@ -153,7 +153,8 @@ class RagRetrieverTool(Tool):
             return cached
         ids, docs = [], []
         for cid, doc in zip(self._child_ids, self._child_docs):
-            if (self._meta_by_id.get(cid) or {}).get("tenant_id", "default") == tenant:
+            t = (self._meta_by_id.get(cid) or {}).get("tenant_id", "shared")
+            if t in (tenant, "shared"):  # 本租户专属 + 共享知识
                 ids.append(cid)
                 docs.append(doc)
         bm25 = BM25Okapi([tokenize(d) for d in docs]) if docs else None
@@ -193,7 +194,7 @@ class RagRetrieverTool(Tool):
         try:
             res = self.collection.query(
                 query_texts=[query], n_results=top_k, include=["documents", "distances"],
-                where={"$and": [{"chunk_type": "child"}, {"tenant_id": tenant}]},
+                where={"$and": [{"chunk_type": "child"}, {"tenant_id": {"$in": [tenant, "shared"]}}]},
             )
             for cid, doc, dist in zip(res["ids"][0], res["documents"][0], res["distances"][0]):
                 candidates.setdefault(cid, doc)

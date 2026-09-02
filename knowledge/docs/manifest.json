@@ -13,5 +13,17 @@
     "owner": "硬件产品部",
     "status": "approved",
     "version": "1.1.0"
+  },
+  "华远科技_园区安防方案.md": {
+    "owner": "华远科技",
+    "status": "approved",
+    "version": "1.0.0",
+    "tenant": "tenant_a"
+  },
+  "蓝鲸制造_产线维保手册.md": {
+    "owner": "蓝鲸制造",
+    "status": "approved",
+    "version": "1.0.0",
+    "tenant": "tenant_b"
   }
 }
