@@ -5,6 +5,11 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # 容器内用 Redis 服务名连接（覆盖 .env 里本地的 localhost）
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
     volumes:
       # ChromaDB 嵌入式运行在 app 内，持久化目录挂载出来
       - ./knowledge/chroma_db:/app/knowledge/chroma_db
@@ -13,5 +18,11 @@ services:
       # HuggingFace 模型缓存（embedding + reranker）持久化，避免每次重建容器都重新下载
       - hf_cache:/root/.cache/huggingface
 
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
 volumes:
   hf_cache:
+  redis_data:

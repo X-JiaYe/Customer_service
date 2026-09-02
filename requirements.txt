@@ -17,5 +17,9 @@ uvicorn==0.52.4
 gradio==6.26.0
 python-dotenv==1.2.3
 
+# ---- 存储 / 可观测 ----
+redis==8.1.0
+prometheus-client==0.26.0
+
 # ---- 文档解析 ----
 pypdf==6.16.2

@@ -11,6 +11,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import urllib.request
 
@@ -21,24 +22,30 @@ if hasattr(sys.stdout, "reconfigure"):
 DEFAULT_URL = "http://127.0.0.1:8000"
 
 
-def _post(base_url: str, path: str, payload: dict | None = None) -> dict:
+def _post(base_url: str, path: str, payload: dict | None = None, api_key: str | None = None) -> dict:
     data = json.dumps(payload).encode() if payload is not None else b""
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{base_url}{path}",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST" if payload is not None else "GET",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         return json.loads(resp.read().decode())
 
 
-def _post_stream(base_url: str, path: str, payload: dict):
+def _post_stream(base_url: str, path: str, payload: dict, api_key: str | None = None):
     """流式模式：逐 token 打印（仅演示用，默认关闭）。"""
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         f"{base_url}{path}",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         for raw in resp:
@@ -61,6 +68,7 @@ def main():
     p.add_argument("--session", default="default", help="会话 ID（多轮记忆）")
     p.add_argument("--url", default=DEFAULT_URL, help="服务地址")
     p.add_argument("--stream", action="store_true", help="逐 token 流式输出（默认关闭，只给最终答案）")
+    p.add_argument("--api-key", default=os.environ.get("CS_API_KEY", "sk-local-dev"), help="API Key（默认取环境变量 CS_API_KEY）")
     p.add_argument("--health", action="store_true", help="健康检查")
     p.add_argument("--ingest", action="store_true", help="触发知识库重新导入")
     args = p.parse_args()
@@ -71,7 +79,7 @@ def main():
         print(json.dumps(_post(base_url, "/health"), ensure_ascii=False))
         return
     if args.ingest:
-        print(json.dumps(_post(base_url, "/knowledge/ingest"), ensure_ascii=False))
+        print(json.dumps(_post(base_url, "/knowledge/ingest", api_key=args.api_key), ensure_ascii=False))
         return
     if not args.message:
         p.print_help()
@@ -79,9 +87,9 @@ def main():
 
     payload = {"message": args.message, "session_id": args.session, "stream": args.stream}
     if args.stream:
-        _post_stream(base_url, "/chat", payload)
+        _post_stream(base_url, "/chat", payload, api_key=args.api_key)
     else:
-        result = _post(base_url, "/chat", payload)
+        result = _post(base_url, "/chat", payload, api_key=args.api_key)
         # 只打印最终答案，过滤掉冗余字段，进一步减少输出
         print(result.get("answer", ""))
 

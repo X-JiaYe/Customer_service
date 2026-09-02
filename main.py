@@ -8,19 +8,20 @@ import argparse
 import json
 import sys
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 import config  # noqa: F401
 from agent import chat, chat_stream, warm_up
+from auth import require_auth
+from store import RedisSessionStore
 
 
 def _warm_up_in_background() -> None:
@@ -53,26 +54,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="智能客服 Agent", lifespan=lifespan)
 
-# 会话管理：session_id -> {"history": [...], "last_active": ts}（MVP 仅内存，带 TTL）
-SESSIONS: dict[str, dict] = {}
+# 会话管理：Redis 持久化（多 worker 共享、重启不丢），key = session:{tenant}:{session_id}
+_session_store = RedisSessionStore()
 
 
-def _get_history(session_id: str) -> list[dict]:
-    """取会话历史；过期则重建，同时顺手清理过期会话防内存泄漏。"""
-    now = time.time()
-    sess = SESSIONS.get(session_id)
-    if sess and now - sess["last_active"] > config.SESSION_TTL_SECONDS:
-        sess = None
-    if sess is None:
-        sess = {"history": [], "last_active": now}
-        SESSIONS[session_id] = sess
-    sess["last_active"] = now
+def _get_history(tenant_id: str, session_id: str) -> list[dict]:
+    """取会话历史（Redis）。"""
+    return _session_store.get_history(tenant_id, session_id)
 
-    # 机会式清理所有过期会话
-    expired = [s for s, v in SESSIONS.items() if now - v["last_active"] > config.SESSION_TTL_SECONDS]
-    for s in expired:
-        del SESSIONS[s]
-    return sess["history"]
+
+def _append_turn(tenant_id: str, session_id: str, role: str, content: str) -> None:
+    """追加一条对话（Redis）。"""
+    _session_store.append_turn(tenant_id, session_id, role, content)
 
 
 class ChatRequest(BaseModel):
@@ -87,7 +80,7 @@ def health():
 
 
 @app.post("/knowledge/ingest")
-def knowledge_ingest():
+def knowledge_ingest(tenant: str = Depends(require_auth)):
     try:
         from knowledge.ingest import ingest  # 懒加载，避免 RAG 依赖缺失时启动失败
 
@@ -98,33 +91,33 @@ def knowledge_ingest():
 
 
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest, tenant: str = Depends(require_auth)):
     """对话接口：默认 SSE 逐 token 推送；stream=false 时只返回最终答案（减 token 输出）。"""
-    history = _get_history(req.session_id)
+    history = _get_history(tenant, req.session_id)
 
     if not req.stream:
         # 非流式：一次性返回最终答案，适合脚本/客户端简洁调用
-        history.append({"role": "user", "content": req.message})
+        _append_turn(tenant, req.session_id, "user", req.message)
         try:
-            answer = await run_in_threadpool(chat, req.message, history[:-1])
+            answer = await run_in_threadpool(chat, req.message, history)
         except Exception:  # noqa: BLE001
             answer = "系统繁忙，请稍后重试"
-        history.append({"role": "assistant", "content": answer})
-        return JSONResponse({"answer": answer, "session_id": req.session_id})
+        _append_turn(tenant, req.session_id, "assistant", answer)
+        return JSONResponse({"answer": answer, "session_id": req.session_id, "tenant_id": tenant})
 
     async def event_stream():
-        history.append({"role": "user", "content": req.message})
+        _append_turn(tenant, req.session_id, "user", req.message)
         answer_parts: list[str] = []
         try:
             # 在线程池中迭代同步生成器，逐 token 异步推送；内部已加锁串行化
-            async for token in iterate_in_threadpool(chat_stream(req.message, history[:-1])):
+            async for token in iterate_in_threadpool(chat_stream(req.message, history)):
                 answer_parts.append(token)
                 yield f"data: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
         except Exception:  # noqa: BLE001
             answer_parts = ["系统繁忙，请稍后重试"]
             yield f"data: {json.dumps({'delta': answer_parts[0]}, ensure_ascii=False)}\n\n"
         answer = "".join(answer_parts)
-        history.append({"role": "assistant", "content": answer})
+        _append_turn(tenant, req.session_id, "assistant", answer)
         yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -1,4 +1,5 @@
 """集中配置管理：从 .env 读取环境变量，提供项目级配置常量。"""
+import json
 import os
 import sys
 from pathlib import Path
@@ -50,6 +51,28 @@ AUTO_INGEST = os.getenv("AUTO_INGEST", "1") == "1"
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
 # 单次注入 LLM 的检索结果字符上限（防上下文超长）
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
+
+# ---------- Redis / 会话 / 审计 ----------
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# 是否记录审计日志（业务动作留痕，写 Redis）
+AUDIT_ENABLED = os.getenv("AUDIT_ENABLED", "1") == "1"
+
+# ---------- 鉴权 / 多租户 / 限流 ----------
+# API_KEYS: JSON 映射 {"api_key": "tenant_id"}；为空 → 开发模式（不鉴权，tenant=default）
+API_KEYS = json.loads(os.getenv("API_KEYS", "{}") or "{}")
+# 每个 租户+IP+接口 每分钟请求上限
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+RATE_LIMIT_WINDOW_SECONDS = 60
+
+# ---------- 安全兜底 ----------
+# RAG 置信度门槛：低于此值判定为「低置信度」，返回不确定 + 建议转人工，不硬编
+RAG_CONFIDENCE_THRESHOLD = float(os.getenv("RAG_CONFIDENCE_THRESHOLD", "0.0"))
+# 是否对输出做 PII 脱敏（手机号/邮箱/身份证/银行卡）
+ENABLE_PII_MASK = os.getenv("ENABLE_PII_MASK", "1") == "1"
+
+# ---------- 业务对接（mock / 生产区分） ----------
+# ENV: dev=业务工具用 mock 数据；prod=必须接真实业务接口（mock 路径显式报错）
+ENV = os.getenv("ENV", "dev")
 
 # ---------- 路径（绝对化，避免 cwd 差异） ----------
 CHROMA_PERSIST_DIR = str((BASE_DIR / os.getenv("CHROMA_PERSIST_DIR", "./knowledge/chroma_db")).resolve())
