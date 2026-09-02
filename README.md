@@ -151,6 +151,8 @@ SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时
 - **成本记账 + 预算告警**（`budget.py`）：按租户核算每小时 LLM 调用次数，超 `BUDGET_MAX_CALLS_PER_HOUR` 时降级（返回话术，不再调用 LLM），响应带 `budget_exceeded: true`。
 - 命中/超预算均有 Prometheus 指标（`cs_cache_hits_total`）。当前以「调用次数」计，精确 token 计量待接 LLM 返回元数据（见 `metrics.observe_tokens` 待办）。
 
+**多渠道接入（§6.2）**：`channels/` 定义跨渠道统一消息模型（`Message`）与企业 IM 适配器（企业微信 / 钉钉 / 飞书的回调解析与回复格式化），agent 核心不感知渠道差异。REST `/chat`、Webhook `/webhook/{channel}`、WebSocket `/ws` 三条通道共用同一套会话/缓存/预算/审计逻辑（`_try_fast_path` + `_process_message`）。企业 IM 的**签名校验**留接口 `channels.webhook.verify_signature`（当前开发模式放行，生产按平台 secret 补齐）。
+
 ## 六、API 接口
 
 | 接口 | 方法 | 请求体 | 响应 |
@@ -158,10 +160,16 @@ SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时
 | `/health` | GET | — | `{"status":"ok"}` |
 | `/knowledge/ingest` | POST | — | `{"status":"ok","message":"..."}` |
 | `/chat` | POST | `{"message": "...", "session_id": "default", "stream": true}` | 见下 |
+| `/webhook/{channel}` | POST | 企业 IM 回调原始 payload | 平台约定回复体 |
+| `/ws` | WebSocket | `{"message":"...","session_id":"default"}` | `{"answer":"..."}` |
 
 `/chat` 响应：
 - `stream=true`（默认）：`text/event-stream`，逐 token 推送 `data: {"delta":"..."}`，结束推 `data: {"done":true}`。
 - `stream=false`：JSON `{"answer":"...","session_id":"..."}`，一次返回最终答案。
+
+`/webhook/{channel}` 支持 `wecom` / `dingtalk` / `feishu`：把各平台文本消息回调规整为统一消息、处理后按平台格式回复（如钉钉 `{"msgtype":"text","text":{"content":...}}`）；非文本消息回「仅支持文本消息」。
+
+`/ws` 鉴权走请求头 `X-API-Key` 或查询参数 `api_key`；当前返回完整答案（非流式），多轮会话用 `session_id` 保持上下文。
 
 ## 七、配置说明（`.env` 关键项）
 

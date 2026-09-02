@@ -12,12 +12,13 @@ import queue
 import sys
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST
 from pydantic import BaseModel
@@ -25,11 +26,12 @@ from starlette.concurrency import run_in_threadpool
 
 import budget
 import cache
+import channels
 import config  # noqa: F401
 import sse
 from agent import chat, chat_stream, warm_up
 from audit import record_audit, set_request_context
-from auth import require_auth
+from auth import require_auth, resolve_tenant
 from feedback import classify_unresolved, record_unanswered, recent, summarize
 from metrics import (
     observe_cache_hit,
@@ -109,6 +111,56 @@ def _maybe_record_unresolved(tenant: str, question: str, answer: str) -> None:
         observe_unresolved(tenant)
 
 
+def _try_fast_path(tenant: str, session_id: str, message: str, history: list[dict]) -> tuple[str, str] | None:
+    """快路径 §6.4：命中语义缓存或超预算时直接返回 (答案, kind)，否则 None 走 LLM。
+
+    kind ∈ {"cached", "budget"}；命中时同步落地会话/审计/指标，不调用 LLM。
+    """
+    if not history:
+        cached = cache.get_answer(tenant, message)
+        if cached is not None:
+            observe_cache_hit(tenant)
+            observe_request(tenant, "ok")
+            _append_turn(tenant, session_id, "user", message)
+            _append_turn(tenant, session_id, "assistant", cached)
+            record_audit("chat", question=message, answer=cached, status="ok", cached=True)
+            return cached, "cached"
+    if budget.check_budget(tenant):
+        msg = "本时段调用量已达上限，请稍后再试，或转人工客服协助处理。"
+        _append_turn(tenant, session_id, "user", message)
+        _append_turn(tenant, session_id, "assistant", msg)
+        observe_request(tenant, "budget_exceeded")
+        record_audit("chat", question=message, answer=msg, status="budget_exceeded")
+        return msg, "budget"
+    return None
+
+
+def _process_message(tenant: str, session_id: str, message: str, history: list[dict]) -> str:
+    """非流式处理单条消息：LLM 生成 + 后处理 + 记账/缓存/审计/指标。返回最终答案。
+
+    同步函数（内部直接调 chat），异步端点用 run_in_threadpool 包裹，避免阻塞事件循环。
+    """
+    start = time.perf_counter()
+    _append_turn(tenant, session_id, "user", message)
+    status = "ok"
+    try:
+        answer = chat(message, history)
+    except Exception:  # noqa: BLE001
+        answer = "系统繁忙，请稍后重试"
+        status = "error"
+        observe_error(tenant)
+    budget.record_call(tenant)
+    answer = _postprocess_answer(answer)
+    if status == "ok" and not history:
+        cache.set_answer(tenant, message, answer)
+    _append_turn(tenant, session_id, "assistant", answer)
+    _maybe_record_unresolved(tenant, message, answer)
+    observe_request(tenant, status)
+    observe_latency(tenant, time.perf_counter() - start)
+    record_audit("chat", question=message, answer=answer, status=status)
+    return answer
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
@@ -165,63 +217,25 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
     # 补全请求上下文里的 session_id（require_auth 只设置了 tenant/request_id）
     set_request_context(tenant, request.state.request_id, req.session_id)
 
-    # 语义缓存 §6.4：单轮（无历史）相同问法直接复用缓存答案，省 LLM 调用与 token
-    cached = cache.get_answer(tenant, req.message) if not history else None
-    if cached is not None:
-        observe_cache_hit(tenant)
-        observe_request(tenant, "ok")
-        _append_turn(tenant, req.session_id, "user", req.message)
-        _append_turn(tenant, req.session_id, "assistant", cached)
-        record_audit("chat", question=req.message, answer=cached, status="ok", cached=True)
+    # 快路径 §6.4：语义缓存命中 / 超预算降级（不调用 LLM），未命中走下方 LLM 路径
+    fast = _try_fast_path(tenant, req.session_id, req.message, history)
+    if fast is not None:
+        answer, kind = fast
+        flag = {"cached": True} if kind == "cached" else {"budget_exceeded": True}
         if not req.stream:
             return JSONResponse(
-                {"answer": cached, "session_id": req.session_id, "tenant_id": tenant, "cached": True}
+                {"answer": answer, "session_id": req.session_id, "tenant_id": tenant, **flag}
             )
 
-        async def _cached_stream():
-            yield sse.sse_event(1, {"delta": cached})
+        async def _fast_stream():
+            yield sse.sse_event(1, {"delta": answer})
             yield sse.sse_event(2, {"done": True})
 
-        return StreamingResponse(_cached_stream(), media_type="text/event-stream")
-
-    # 预算告警 §6.4：超预算降级（返回话术，不再调用 LLM），避免单租户打爆配额
-    if budget.check_budget(tenant):
-        msg = "本时段调用量已达上限，请稍后再试，或转人工客服协助处理。"
-        _append_turn(tenant, req.session_id, "user", req.message)
-        _append_turn(tenant, req.session_id, "assistant", msg)
-        observe_request(tenant, "budget_exceeded")
-        record_audit("chat", question=req.message, answer=msg, status="budget_exceeded")
-        if not req.stream:
-            return JSONResponse(
-                {"answer": msg, "session_id": req.session_id, "tenant_id": tenant, "budget_exceeded": True}
-            )
-
-        async def _budget_stream():
-            yield sse.sse_event(1, {"delta": msg})
-            yield sse.sse_event(2, {"done": True})
-
-        return StreamingResponse(_budget_stream(), media_type="text/event-stream")
+        return StreamingResponse(_fast_stream(), media_type="text/event-stream")
 
     if not req.stream:
         # 非流式：一次性返回最终答案，适合脚本/客户端简洁调用
-        start = time.perf_counter()
-        _append_turn(tenant, req.session_id, "user", req.message)
-        status = "ok"
-        try:
-            answer = await run_in_threadpool(chat, req.message, history)
-        except Exception:  # noqa: BLE001
-            answer = "系统繁忙，请稍后重试"
-            status = "error"
-            observe_error(tenant)
-        budget.record_call(tenant)
-        answer = _postprocess_answer(answer)
-        if status == "ok" and not history:
-            cache.set_answer(tenant, req.message, answer)
-        _append_turn(tenant, req.session_id, "assistant", answer)
-        _maybe_record_unresolved(tenant, req.message, answer)
-        observe_request(tenant, status)
-        observe_latency(tenant, time.perf_counter() - start)
-        record_audit("chat", question=req.message, answer=answer, status=status)
+        answer = await run_in_threadpool(_process_message, tenant, req.session_id, req.message, history)
         return JSONResponse({"answer": answer, "session_id": req.session_id, "tenant_id": tenant})
 
     # 断点续传 §6.3：客户端带 Last-Event-ID 重连时，从缓冲重放尾部，不重复生成
@@ -300,6 +314,74 @@ async def chat_endpoint(req: ChatRequest, request: Request, tenant: str = Depend
             yield sse.sse_event(eid, {"delta": payload})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/webhook/{channel}")
+async def webhook_endpoint(
+    channel: str, payload: dict, request: Request, tenant: str = Depends(require_auth)
+):
+    """企业 IM 渠道接入 §6.2：接收企业微信/钉钉/飞书回调，规整 → 处理 → 按平台格式回复。
+
+    渠道鉴权复用 X-API-Key（生产由网关/渠道配置派生 tenant）；签名校验见
+    channels.webhook.verify_signature（当前放行，生产补各平台 secret）。
+    """
+    if channel not in channels.webhook.SUPPORTED:
+        return JSONResponse({"status": "error", "message": f"不支持的渠道：{channel}"}, status_code=404)
+    msg = channels.webhook.parse(channel, payload)
+    if msg is None:
+        return JSONResponse(channels.webhook.reply(channel, "仅支持文本消息"))
+    if not channels.webhook.verify_signature(channel, payload, dict(request.headers)):
+        return JSONResponse(channels.webhook.reply(channel, "签名校验失败"), status_code=401)
+
+    session_id = msg.session_key()
+    set_request_context(tenant, request.state.request_id, session_id)
+    history = _get_history(tenant, session_id)
+    fast = _try_fast_path(tenant, session_id, msg.content, history)
+    if fast is not None:
+        answer, _ = fast
+    else:
+        answer = await run_in_threadpool(_process_message, tenant, session_id, msg.content, history)
+    return JSONResponse(channels.webhook.reply(channel, answer))
+
+
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket):
+    """WebSocket 渠道 §6.2：长连接多轮对话，客户端发 {"message","session_id","stream"}。
+
+    鉴权：请求头 X-API-Key 或查询参数 api_key（浏览器无法设头时用后者）。
+    当前返回完整答案（非流式）；流式逐 token 推送可复用 SSE 生产线程模式，留作后续。
+    """
+    api_key = websocket.headers.get("X-API-Key") or websocket.query_params.get("api_key")
+    if config.API_KEYS:
+        tenant = resolve_tenant(api_key)
+        if tenant is None:
+            await websocket.close(code=1008, reason="无效或缺失的 API Key")
+            return
+    else:
+        tenant = "default"
+
+    await websocket.accept()
+    request_id = uuid.uuid4().hex
+    try:
+        while True:
+            data = await websocket.receive_json()
+            message = str(data.get("message", "")).strip()
+            session_id = str(data.get("session_id") or "default")
+            if not message:
+                await websocket.send_json({"error": "message 不能为空"})
+                continue
+            set_request_context(tenant, request_id, session_id)
+            history = _get_history(tenant, session_id)
+            fast = _try_fast_path(tenant, session_id, message, history)
+            if fast is not None:
+                answer, kind = fast
+                flag = {"cached": True} if kind == "cached" else {"budget_exceeded": True}
+                await websocket.send_json({"answer": answer, "session_id": session_id, **flag})
+                continue
+            answer = await run_in_threadpool(_process_message, tenant, session_id, message, history)
+            await websocket.send_json({"answer": answer, "session_id": session_id})
+    except WebSocketDisconnect:
+        pass
 
 
 def run_gradio():
