@@ -1,4 +1,4 @@
-"""订单查询工具（模拟 API）。"""
+"""订单查询工具：封装 OrderAPI 契约，dev 环境用内置 mock 数据。"""
 import json
 import sys
 from pathlib import Path
@@ -8,8 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from smolagents import tool
 
 from audit import record_audit
+from business_api import OrderAPI, mock_only
 
-# 模拟订单数据（5-10 条）
+# 模拟订单数据（仅 dev 环境使用；prod 需接真实系统实现 OrderAPI 契约）
 _ORDERS = [
     {
         "order_id": "TK20250301",
@@ -56,6 +57,22 @@ _ORDERS = [
 ]
 
 
+class MockOrderAPI:
+    """OrderAPI 契约的 mock 实现（内置样例数据）。"""
+
+    def query_order(self, order_id: str) -> dict:
+        for order in _ORDERS:
+            if order["order_id"] == order_id:
+                return order
+        raise KeyError(order_id)
+
+
+def _get_order_api() -> OrderAPI:
+    # 生产环境需接真实实现；当前只有 mock，prod 下显式报错
+    mock_only("query_order")
+    return MockOrderAPI()
+
+
 @tool
 def query_order(order_id: str) -> str:
     """根据订单号查询订单信息。
@@ -63,9 +80,10 @@ def query_order(order_id: str) -> str:
     Args:
         order_id: 订单号，例如 TK20250301
     """
-    for order in _ORDERS:
-        if order["order_id"] == order_id:
-            record_audit("query_order", order_id=order_id, found=True)
-            return json.dumps(order, ensure_ascii=False, indent=2)
-    record_audit("query_order", order_id=order_id, found=False)
-    return f"未找到订单 {order_id}，请确认订单号是否正确。"
+    try:
+        order = _get_order_api().query_order(order_id)
+    except KeyError:
+        record_audit("query_order", order_id=order_id, found=False)
+        return f"未找到订单 {order_id}，请确认订单号是否正确。"
+    record_audit("query_order", order_id=order_id, found=True)
+    return json.dumps(order, ensure_ascii=False, indent=2)
