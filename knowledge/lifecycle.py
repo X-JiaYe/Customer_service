@@ -21,8 +21,7 @@ MANIFEST_NAME = "manifest.json"
 HISTORY_NAME = "ingest_history.jsonl"
 
 # 未在 manifest.json 中声明的文档，用安全默认值（已发布、永不过期、无 owner、版本 1.0.0）
-# tenant 默认 "shared" = 共享知识（所有租户可见）；显式声明 tenant 即为该租户专属
-DEFAULT_META = {"owner": "", "status": STATUS_APPROVED, "valid_until": None, "version": "1.0.0", "tenant": "shared"}
+DEFAULT_META = {"owner": "", "status": STATUS_APPROVED, "valid_until": None, "version": "1.0.0"}
 
 
 def parse_date(s: str | None) -> date | None:
@@ -48,8 +47,6 @@ def normalize_meta(raw: dict | None) -> dict:
         meta["status"] = raw["status"]
     if raw.get("valid_until"):
         meta["valid_until"] = parse_date(raw["valid_until"])
-    if raw.get("tenant"):
-        meta["tenant"] = str(raw["tenant"])
     return meta
 
 

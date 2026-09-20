@@ -1,29 +1,27 @@
 {
-  "FAQ_常见问题与售后服务.md": {
-    "owner": "客服运营组",
-    "status": "approved",
-    "version": "1.2.0"
-  },
-  "产品手册_物联网智能网关GW200.md": {
-    "owner": "硬件产品部",
+  "员工岗位职责与分工手册.md": {
+    "owner": "人事行政部",
     "status": "approved",
     "version": "2.0.0"
   },
-  "用户指南_温湿度传感器节点TH100.md": {
-    "owner": "硬件产品部",
+  "客服部_售前售后与争议处理FAQ.md": {
+    "owner": "客服部",
     "status": "approved",
-    "version": "1.1.0"
+    "version": "1.3.0"
   },
-  "华远科技_园区安防方案.md": {
-    "owner": "华远科技",
+  "运营部_店铺日常运营操作手册.md": {
+    "owner": "运营部",
     "status": "approved",
-    "version": "1.0.0",
-    "tenant": "tenant_a"
+    "version": "1.2.0"
   },
-  "蓝鲸制造_产线维保手册.md": {
-    "owner": "蓝鲸制造",
+  "亚马逊运营组_美国站运营细则.md": {
+    "owner": "亚马逊运营组",
     "status": "approved",
-    "version": "1.0.0",
-    "tenant": "tenant_b"
+    "version": "1.0.0"
+  },
+  "独立站运营组_DTC品牌站运营细则.md": {
+    "owner": "独立站运营组",
+    "status": "approved",
+    "version": "1.0.0"
   }
 }

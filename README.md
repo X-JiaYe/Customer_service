@@ -1,68 +1,63 @@
-# 智能客服 Agent
+# 电商内容 RAG 知识库
 
-基于 **LLM + RAG** 的 B2B 智能客服系统。用户提问后，Agent 自主判断意图并调用对应工具完成回答，支持四大核心能力：
+基于 **LLM + RAG** 的跨境电商内部知识问答系统。员工提问后，Agent 从内部知识库（岗位职责、客服 FAQ、运营手册、亚马逊/独立站运营细则）中检索相关内容作答，帮助员工**尽职尽责、分工明确**。
 
-| 能力 | 工具 | 说明 |
-|------|------|------|
-| 知识库问答 | `knowledge_retriever` | BM25 + 向量混合检索 + Reranker 重排 |
-| 订单查询 | `query_order` | 按订单号查询（模拟数据） |
-| 工单创建 | `create_ticket` | 生成工单号，写入本地 `tickets.jsonl` |
-| 转人工 | `transfer_to_human` | 记录转人工日志并返回提示 |
+| 能力 | 说明 |
+|------|------|
+| 知识库问答 | `knowledge_retriever`：BM25（词法）+ 向量（语义）混合检索，命中片段附「【来源】」标注 |
+| 低置信度拒答 | 检索结果与问题相关性不足时明确告知「暂不确定」，不硬编 |
+| 不编造纪律 | 无来源依据不报具体价格/时限/数字，规避绝对化承诺 |
 
-Agent 使用 **ToolCallingAgent**（模型只做原生函数调用、不执行代码，免代码执行沙箱风险）。
+知识问答采用 **检索 + 生成（retrieve-then-generate）**：先做 BM25+向量混合检索得到上下文，再把「上下文 + 问题」一次性交给 LLM 生成答案。不依赖模型的 function calling 能力，单次请求只打一次 LLM。
+
+> 定位：**最小 MVP**。单进程、内存会话、单工具 RAG 问答，零外部依赖（无需 Docker/Redis）。已移除多租户、SSE 流式、Redis、语义缓存、预算、审计、指标、多渠道、多业务工具、熔断器等非核心层。
 
 ---
 
-## 一、架构：前端 + 后端
+## 一、技术栈
 
-- **后端**：FastAPI + SSE 流式响应（`main.py`），三个接口 `/chat`、`/health`、`/knowledge/ingest`。
-- **前端（图形）**：Gradio ChatInterface，浏览器里对话，开发调试用。
-- **前端（命令行）**：`client.py`，零依赖，默认只打印最终答案。
-- **LLM**：DeepSeek（OpenAI 兼容接口，经 LiteLLM 接入）。
-- **RAG**：ChromaDB（向量）+ BM25（词法）→ 合并去重 → FlagEmbedding `bge-reranker-v2-m3` 重排。
-
-## 二、技术栈
-
-- Agent 框架：`smolagents`（ToolCallingAgent）
-- LLM：DeepSeek（`deepseek-chat`）
+- 生成：`smolagents` 的 `LiteLLMModel`（检索 + 生成，单次 LLM 调用）
+- LLM：智谱 GLM（`glm-4-flash`，OpenAI 兼容，经 LiteLLM 接入）
 - 向量库：ChromaDB（嵌入式，本地持久化）
 - Embedding：`BAAI/bge-small-zh-v1.5`
-- Reranker：`BAAI/bge-reranker-v2-m3`
-- 混合检索：`rank-bm25` + ChromaDB 向量 + FlagEmbedding 重排
-- 后端：FastAPI + Uvicorn（SSE 流式）
-- 前端：Gradio ChatInterface
-- 部署：Docker Compose
+- 混合检索：`rank-bm25` + ChromaDB 向量（Reranker 默认关闭，`ENABLE_RERANKER=0`）
+- 后端：FastAPI + Uvicorn（非流式）
+- 前端：Gradio ChatInterface（调试）+ `client.py`（命令行）
 
-## 三、项目结构
+## 二、项目结构
 
 ```
 customer-service/
-├── main.py                 # FastAPI 入口（SSE 流式 + Gradio）
-├── agent.py                # ToolCallingAgent 初始化 + 工具注册 + 流式抽取
-├── client.py               # 命令行客户端（零依赖，减 token 输出）
+├── main.py                 # FastAPI 入口（/chat + /health + /knowledge/ingest）
+├── agent.py                # 检索 + 生成：RAG 检索器 + LLM 生成
+├── client.py               # 命令行客户端（零依赖，只打印最终答案）
 ├── config.py               # 集中配置（读 .env）
+├── auth.py                 # 单 API Key 鉴权（可选，留空 = 免鉴权）
+├── store.py                # 进程内内存会话存储
+├── security.py             # PII 脱敏 + 输出安全兜底
 ├── tools/
-│   ├── rag_retriever.py    # 混合检索工具（BM25 + 向量 + Reranker）
-│   ├── order_api.py        # 订单查询工具（模拟 API）
-│   ├── ticket_api.py       # 工单创建工具
-│   └── transfer_human.py   # 转人工工具
+│   └── rag_retriever.py    # 混合检索工具（BM25 + 向量）
 ├── knowledge/
 │   ├── ingest.py           # 文档导入：文件 → 分块 → Embedding → ChromaDB
-│   ├── docs/               # 知识库文档（.txt / .md / .pdf）
-│   └── chroma_db/          # ChromaDB 持久化目录（自动生成，勿手动改）
+│   ├── chunking.py         # 父子块构建
+│   ├── context.py          # 上下文组装（去重 + 预算裁剪）
+│   ├── embedding.py        # BGE Embedding 函数
+│   ├── lifecycle.py        # 知识生命周期（status / valid_until / version）
+│   ├── backup.py           # 向量库快照 / 恢复 / 重建
+│   └── docs/               # 知识库文档（.md / .txt / .pdf）
+├── eval/                   # RAG 检索离线评测（Recall@K / MRR）
 ├── tests/                  # pytest 测试
 ├── requirements.txt        # 运行时依赖（版本已钉死）
-├── requirements-dev.txt    # 开发/测试依赖
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env                    # 密钥与配置（不入库）
 ```
 
-## 四、快速开始
+## 三、快速开始
 
 ### 方式 A：本地运行（开发调试推荐）
 
-**前置条件**：Python 3.12 64-bit、DeepSeek API Key。
+**前置条件**：Python 3.12 64-bit、智谱 API Key。
 
 ```bash
 cd customer-service
@@ -74,8 +69,8 @@ python -m venv .venv
 # 2) 安装依赖（国内可加 -i 换源加速）
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 
-# 3) 配置环境变量：复制 .env 并填入 DeepSeek Key
-#    （项目已含 .env 模板，把 DEEPSEEK_API_KEY 改成你的真实 key）
+# 3) 配置环境变量：把 .env 里 LLM_API_KEY 改成你的真实智谱 Key
+#    （项目已含 .env 模板，见 .env.example）
 
 # 4) 导入知识库（首次或文档有更新时执行）
 .venv/Scripts/python.exe -m knowledge.ingest
@@ -102,20 +97,7 @@ curl http://127.0.0.1:8000/health
 # 预期返回 {"status":"ok"}
 ```
 
-> **国内网络前置**：如果构建时 `registry-1.docker.io` 连接失败，需给 Docker Desktop 配置 registry 镜像（编辑 `~/.docker/daemon.json` 增加 `registry-mirrors` 后重启 Docker Desktop）。
-
-## 五、使用方式
-
-### 0. 浏览器网页（用户侧前端 §6.1）
-
-启动 API 后浏览器打开 `http://127.0.0.1:8000/` 即是聊天页（`static/index.html`，轻量无构建，可直接替换为 Vue+Vite）。支持：
-
-- **流式渲染**：答案逐 token 实时显示（SSE）；
-- **引用点击**：答案末尾附「来源/参考」的行会被抽出为可点击复制块；
-- **转人工**：一键发送转人工请求（走 `transfer_to_human` 工具）；
-- **满意度**：每条答案可 👍/👎，POST 到 `/feedback` 沉淀为 `feedback:satisfaction`。
-
-网页右上角可填 `X-API-Key`（留空 = 开发模式）；会话 id 存于浏览器 `sessionStorage`，刷新保持同一会话。
+## 四、使用方式
 
 ### 1. 图形界面（Gradio）
 
@@ -127,122 +109,71 @@ curl http://127.0.0.1:8000/health
 cd customer-service
 
 # 单轮问答（默认只打印最终答案）
-.venv/Scripts/python.exe client.py "你们的产品支持哪些支付方式？"
+.venv/Scripts/python.exe client.py "各部门岗位职责怎么划分？"
 
 # 多轮会话（--session 保持上下文记忆）
-.venv/Scripts/python.exe client.py "查订单 TK20250301 的状态" --session demo
-.venv/Scripts/python.exe client.py "那它的物流到哪了？" --session demo
+.venv/Scripts/python.exe client.py "亚马逊 FBA 备货要提前多久下单？" --session demo
+.venv/Scripts/python.exe client.py "那断货率红线是多少？" --session demo
 
 # 健康检查 / 重新导入知识库
 .venv/Scripts/python.exe client.py --health
 .venv/Scripts/python.exe client.py --ingest
-
-# 想看逐 token 流式输出时加 --stream
-.venv/Scripts/python.exe client.py "..." --stream
 ```
 
 ### 3. 直接调 API
 
 ```bash
-# 非流式：只返回最终答案
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message":"你们的产品支持哪些支付方式？","stream":false}'
+  -d '{"message":"退换货政策是什么？"}'
 
-# 流式：SSE 逐 token 推送
-curl -N -X POST http://127.0.0.1:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message":"帮我查订单 TK20250301","stream":true}'
-```
-
-SSE 流带 `id:` 事件序号 + 心跳注释行（长回答期间防空闲超时）；断线后带 `Last-Event-ID: <最后收到的 id>` 重连即可**断点续传**（在 `SSE_STREAM_TTL_SECONDS` 窗口内从缓冲重放，不重复生成）。
-
-**Token 成本控制（§6.4）**：
-- **语义缓存**（`cache.py`）：单轮（无历史）相同问法命中缓存直接复用答案，省一次 LLM 调用。归一化（去空白/标点/大小写）后「支持哪些付款方式？」与「支持哪些付款方式！」命中同一缓存；命中时响应带 `cached: true`。缓存答案带 TTL（`CACHE_TTL_SECONDS`）。
-- **成本记账 + 预算告警**（`budget.py`）：按租户核算每小时 LLM 调用次数，超 `BUDGET_MAX_CALLS_PER_HOUR` 时降级（返回话术，不再调用 LLM），响应带 `budget_exceeded: true`。
-- 命中/超预算均有 Prometheus 指标（`cs_cache_hits_total`）。当前以「调用次数」计，精确 token 计量待接 LLM 返回元数据（见 `metrics.observe_tokens` 待办）。
-
-**多渠道接入（§6.2）**：`channels/` 定义跨渠道统一消息模型（`Message`）与企业 IM 适配器（企业微信 / 钉钉 / 飞书的回调解析与回复格式化），agent 核心不感知渠道差异。REST `/chat`、Webhook `/webhook/{channel}`、WebSocket `/ws` 三条通道共用同一套会话/缓存/预算/审计逻辑（`_try_fast_path` + `_process_message`）。企业 IM 的**签名校验**留接口 `channels.webhook.verify_signature`（当前开发模式放行，生产按平台 secret 补齐）。
-
-### 4. 多租户（租户机器人）
-
-项目支持**多租户知识隔离**：每个租户持有一把独立 API Key，登录后只能检索「本租户专属知识 + 全局共享知识」，跨租户知识不可见。
-
-#### 租户 ↔ API Key 对照
-
-| API Key | 租户 | 可见知识 |
-|---|---|---|
-| `sk-local-dev` | `default`（开发/默认） | 共享知识（FAQ / 产品手册 / 用户指南） |
-| `sk-huayuan` | `tenant_a`（华远科技） | 共享知识 + 《华远科技_园区安防方案》 |
-| `sk-lanjing` | `tenant_b`（蓝鲸制造） | 共享知识 + 《蓝鲸制造_产线维保手册》 |
-
-#### 用不同租户身份调用
-
-```bash
-# 华远科技（tenant_a）：问门禁/安防，命中专属方案
-.venv/Scripts/python.exe client.py "门禁访客预约怎么操作？" --api-key sk-huayuan
-
-# 蓝鲸制造（tenant_b）：问维保/备件，命中专属手册
-.venv/Scripts/python.exe client.py "冲压线多久巡检一次？" --api-key sk-lanjing
-
-# 用 A 租户的 key 问 B 租户的内容 → 只回共享知识，不泄露蓝鲸
-.venv/Scripts/python.exe client.py "产线设备维保巡检" --api-key sk-huayuan
-```
-
-```bash
-# 直接调 API 同理，带 X-API-Key 头
+# 配置了 API_KEY 时，带上 X-API-Key 头
 curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: sk-huayuan" \
-  -d '{"message":"门禁访客预约怎么操作？","stream":false}'
+  -H "X-API-Key: your-key" \
+  -d '{"message":"各部门岗位职责怎么划分？"}'
 ```
 
-前端登录页填对应 API Key 即可（网页右上角 `X-API-Key`，留空 = 开发模式 `default`）。
+## 五、知识库文档
 
-#### 新增一个租户
+`knowledge/docs/` 下为知识库内容（面向员工的跨境电商运营规范）：
 
-1. 在 `knowledge/docs/` 放该租户的专属文档，并在 `manifest.json` 里给它加 `"tenant": "tenant_x"`。
-2. 在 `.env` 的 `API_KEYS` 里加一条映射 `"sk-xxx":"tenant_x"`。
-3. 重新导入：`.venv/Scripts/python.exe -m knowledge.ingest`。
+| 文档 | 负责人 | 说明 |
+|------|--------|------|
+| 员工岗位职责与分工手册.md | 人事行政部 | 组织架构、岗位分工、勤勉履职与 KPI |
+| 客服部_售前售后与争议处理FAQ.md | 客服部 | 售前/物流/退换/争议处理与响应 SLA |
+| 运营部_店铺日常运营操作手册.md | 运营部 | 每日例行、选品上架、广告、活动复盘 |
+| 亚马逊运营组_美国站运营细则.md | 亚马逊运营组 | FBA 备货、ACoS 红线、类目合规 |
+| 独立站运营组_DTC品牌站运营细则.md | 独立站运营组 | 投放 ROI、SEO、EDM、支付物流 |
 
-> 不带 `tenant` 的文档 = **共享知识**，对所有租户可见；`tenant` 指定的文档仅该租户可见。
+每个文档在 `manifest.json` 中声明生命周期元数据（`owner`/`status`/`version`）。
 
 ## 六、API 接口
 
 | 接口 | 方法 | 请求体 | 响应 |
 |------|------|--------|------|
-| `/` | GET | — | 用户侧聊天页（`static/index.html`） |
 | `/health` | GET | — | `{"status":"ok"}` |
+| `/chat` | POST | `{"message":"...","session_id":"default"}` | `{"answer":"...","session_id":"..."}` |
 | `/knowledge/ingest` | POST | — | `{"status":"ok","message":"..."}` |
-| `/chat` | POST | `{"message": "...", "session_id": "default", "stream": true}` | 见下 |
-| `/feedback` | POST | `{"rating":"up/down","session_id":"...","question":"","answer":""}` | `{"status":"ok"}` |
-| `/webhook/{channel}` | POST | 企业 IM 回调原始 payload | 平台约定回复体 |
-| `/ws` | WebSocket | `{"message":"...","session_id":"default"}` | `{"answer":"..."}` |
 
-`/chat` 响应：
-- `stream=true`（默认）：`text/event-stream`，逐 token 推送 `data: {"delta":"..."}`，结束推 `data: {"done":true}`。
-- `stream=false`：JSON `{"answer":"...","session_id":"..."}`，一次返回最终答案。
-
-`/webhook/{channel}` 支持 `wecom` / `dingtalk` / `feishu`：把各平台文本消息回调规整为统一消息、处理后按平台格式回复（如钉钉 `{"msgtype":"text","text":{"content":...}}`）；非文本消息回「仅支持文本消息」。
-
-`/ws` 鉴权走请求头 `X-API-Key` 或查询参数 `api_key`；当前返回完整答案（非流式），多轮会话用 `session_id` 保持上下文。
+`/chat` 为非流式：一次性返回最终答案。
 
 ## 七、配置说明（`.env` 关键项）
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `DEEPSEEK_API_KEY` | **必填**，DeepSeek API Key | — |
-| `DEEPSEEK_BASE_URL` | DeepSeek 接口地址 | `https://api.deepseek.com` |
-| `DEEPSEEK_MODEL` | 模型名 | `deepseek-chat` |
+| `LLM_API_KEY` | **必填**，智谱 API Key | — |
+| `LLM_BASE_URL` | 智谱接口地址 | `https://open.bigmodel.cn/api/paas/v4/` |
+| `LLM_MODEL` | 模型名 | `glm-4-flash` |
 | `EMBEDDING_MODEL` | 向量模型 | `BAAI/bge-small-zh-v1.5` |
-| `RERANKER_MODEL` | 重排模型 | `BAAI/bge-reranker-v2-m3` |
-| `ENABLE_RERANKER` | 是否启用重排（1/0） | `1` |
+| `ENABLE_RERANKER` | 是否启用重排（1/0，默认关闭） | `0` |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 分块大小 / 重叠 | `500` / `50` |
 | `RETRIEVE_TOP_K` / `RERANK_TOP_N` | 粗排数 / 精排取 N | `20` / `5` |
-| `HF_ENDPOINT` | HuggingFace 镜像（国内加速） | `https://hf-mirror.com` |
-| `HF_HUB_DISABLE_XET` | 禁用 Xet 存储（大文件走普通 HTTP，避开镜像 401） | `1` |
-
-> **Reranker 说明**：`bge-reranker-v2-m3` 约 2.3GB，首次检索才下载（国内较慢）。知识库较小时建议设 `ENABLE_RERANKER=0` 跳过，BM25+向量两路已够用；文档上量后再开启。
+| `API_KEY` | 单值鉴权 Key（空 = 免鉴权） | — |
+| `RAG_CONFIDENCE_THRESHOLD` | 低置信度门槛 | `0.5` |
+| `ENABLE_PII_MASK` | 输出 PII 脱敏（1/0） | `1` |
+| `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | LLM 超时（秒）/ 重试次数 | `60` / `2` |
+| `HF_ENDPOINT` / `HF_HUB_DISABLE_XET` | HuggingFace 镜像 / 禁 Xet | `hf-mirror.com` / `1` |
 
 ## 八、更新知识库
 
@@ -256,47 +187,40 @@ docker compose exec app python -m knowledge.ingest # Docker 内
 
 导入是**增量**的（按「文件名 + 修改时间 + 生命周期元数据」判断，未变化自动跳过）。
 
-### 知识生命周期治理（§5.1）
+### 知识生命周期治理
 
 `knowledge/docs/manifest.json` 声明每个文档的生命周期元数据（未声明的走默认值：已发布 / 永不过期 / 无 owner / v1.0.0）：
 
 ```json
 {
-  "FAQ_常见问题与售后服务.md": {
-    "owner": "客服运营组",
+  "员工岗位职责与分工手册.md": {
+    "owner": "人事行政部",
     "status": "approved",
     "valid_until": "2027-12-31",
-    "version": "1.2.0"
-  },
-  "华远科技_园区安防方案.md": {
-    "owner": "华远科技",
-    "status": "approved",
-    "version": "1.0.0",
-    "tenant": "tenant_a"
+    "version": "2.0.0"
   }
 }
 ```
 
 - `status`：`draft`（草稿）→ `pending`（待审）→ `approved`（已发布）→ `deprecated`（已下架）。
 - `valid_until`：ISO 日期，到期后自动**不再被检索**（到期下架）。
-- `tenant`：可选，多租户专属文档的归属租户；缺省 = **共享知识**（所有租户可见）。详见「五、使用方式 → 4. 多租户」。
 - 只有 `approved` 且未过期的知识才会进入检索；`draft`/`pending`/`deprecated` 一律过滤。
 - 每次入库追加一条 `knowledge/ingest_history.jsonl`，可用 `lifecycle.list_history(path, source)` 回溯任意文档的历史版本。
 
-### 长上下文优化（父子块 §5.7）
+### 长上下文优化（父子块）
 
-导入时把文档切成 **child chunk**（检索用，精准）并归并为 **parent chunk**（注入 LLM 用，上下文完整，`CHUNK_PARENT_SIZE` 控制）。检索只走 child，命中的 child 会展开为 parent 完整上下文，再经**近重复去重 + 按预算裁剪**（`knowledge/context.py`）组装，替代原来的「简单拼接 + 硬截断」，避免超长文档/跨段推理时上下文被拦腰截断。
+导入时把文档切成 **child chunk**（检索用，精准）并归并为 **parent chunk**（注入 LLM 用，上下文完整，`CHUNK_PARENT_SIZE` 控制）。检索只走 child，命中的 child 会展开为 parent 完整上下文，再经**近重复去重 + 按预算裁剪**（`knowledge/context.py`）组装，避免超长文档/跨段推理时上下文被拦腰截断。
 
-### 备份与容灾（§5.8）
+### 备份与容灾
 
-- 知识库（ChromaDB）持久化在 `knowledge/chroma_db/`（Docker 内已 bind mount 到宿主机）；Redis 会话/审计开启 **AOF 持久化**，异常宕机最多丢 1 秒写。
-- 快照 / 恢复 / 重建（`python -m knowledge.backup --help`）：
-  ```bash
-  .venv/Scripts/python.exe -m knowledge.backup --backup                 # 快照向量库
-  .venv/Scripts/python.exe -m knowledge.backup --restore backup/<快照>   # 回滚
-  .venv/Scripts/python.exe -m knowledge.backup --rebuild                # 从 docs 全量重导（灾难恢复兜底）
-  .venv/Scripts/python.exe -m knowledge.backup --verify                 # 恢复后自检
-  ```
+知识库（ChromaDB）持久化在 `knowledge/chroma_db/`（Docker 内已 bind mount 到宿主机）：
+
+```bash
+.venv/Scripts/python.exe -m knowledge.backup --backup                 # 快照向量库
+.venv/Scripts/python.exe -m knowledge.backup --restore backup/<快照>   # 回滚
+.venv/Scripts/python.exe -m knowledge.backup --rebuild                # 从 docs 全量重导（灾难恢复兜底）
+.venv/Scripts/python.exe -m knowledge.backup --verify                 # 恢复后自检
+```
 
 ## 九、测试
 
@@ -305,14 +229,13 @@ docker compose exec app python -m knowledge.ingest # Docker 内
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-### RAG 检索评测（Recall@K / MRR，§5.4）
+### RAG 检索评测（Recall@K / MRR）
 
 知识库更新后，用种子评测集离线验证检索质量（`eval/seed_dataset.json`，query → 期望文档）：
 
 ```bash
 .venv/Scripts/python.exe -m eval.rag_eval                     # 默认评测集 + K=5,10
 .venv/Scripts/python.exe -m eval.rag_eval --k 5 10 20         # 自定义 K
-ENABLE_RERANKER=0 .venv/Scripts/python.exe -m eval.rag_eval   # 跳过重排，仅 BM25+向量
 ```
 
 输出 Recall@K / MRR 与未命中样本（query → 期望 → 实际 top5），供补充知识或调参参考。
@@ -320,19 +243,18 @@ ENABLE_RERANKER=0 .venv/Scripts/python.exe -m eval.rag_eval   # 跳过重排，�
 ## 十、常见问题
 
 1. **系统 Python 报 `cannot import name '_imaging' from PIL`**：用了 32 位 Python 3.9，请改用 `.venv/Scripts/python.exe`（Python 3.12 64-bit）。
-2. **Docker 构建 `registry-1.docker.io` 连接失败**：国内网络需给 Docker Desktop 配 registry 镜像。
-3. **首次启动慢 / RAG 首答慢**：冷启动要加载 embedding 模型（约十几秒）；reranker 2.3GB 首次下载较慢，可先 `ENABLE_RERANKER=0`。
-4. **Windows 控制台中文乱码**：本项目已在 `config.py` / `client.py` 强制 UTF-8 输出，若仍有乱码请确认终端编码为 UTF-8。
-5. **进程退出时报 `ResourceTracker.__del__` 错误**：Windows/Python3.12 + `multiprocess` 库的已知良性噪声，不影响结果。
-6. **下载 reranker 时报 `401 Unauthorized`（`cas-server.xethub.hf.co`）**：大模型文件走 HuggingFace 的 Xet 存储，`hf-mirror.com` 不代理其 CAS 接口导致回落真实域名鉴权失败。在 `.env` 里设 `HF_HUB_DISABLE_XET=1`（项目已默认配置）即可改走普通 HTTP 下载。
+2. **首次启动慢 / RAG 首答慢**：冷启动要加载 embedding 模型（约十几秒）。
+3. **Windows 控制台中文乱码**：本项目已在 `config.py` / `client.py` 强制 UTF-8 输出，若仍有乱码请确认终端编码为 UTF-8。
+4. **进程退出时报 `ResourceTracker.__del__` 错误**：Windows/Python3.12 + `multiprocess` 库的已知良性噪声，不影响结果。
+5. **会话在重启后丢失**：会话存于进程内内存，重启即清空（单实例 MVP 的取舍，后续多实例可接回外部存储）。
 
 ## 十一、验收场景
 
-启动后发送以下问题，Agent 应调用对应工具：
+启动后发送以下问题，Agent 应调用 `knowledge_retriever` 检索作答：
 
-| 问题 | 预期调用工具 |
+| 问题 | 预期来源文档 |
 |------|--------------|
-| 你们的产品支持哪些支付方式？ | `knowledge_retriever` |
-| 帮我查一下订单 TK20250301 的状态 | `query_order` |
-| 我要投诉，帮我转人工 | `transfer_to_human` |
-| 帮我提一个工单，问题是页面加载很慢 | `create_ticket` |
+| 各部门岗位职责怎么划分？ | 员工岗位职责与分工手册.md |
+| 退换货政策是什么？ | 客服部_售前售后与争议处理FAQ.md |
+| 亚马逊 ACoS 红线是多少？ | 亚马逊运营组_美国站运营细则.md |
+| 独立站广告 ROAS 目标是多少？ | 独立站运营组_DTC品牌站运营细则.md |

@@ -1,53 +1,44 @@
-"""Redis 连接与存储：会话持久化、审计、限流共用同一个连接。
+"""进程内内存会话存储（单实例 MVP，无外部依赖）。
 
-会话用 Redis LIST 存储（原子 RPUSH + LTRIM 限长 + EXPIRE 设 TTL），
-key = session:{tenant_id}:{session_id}。多 worker / 重启后会话不丢。
+会话用 dict 存储（session_id -> [{role, content}, ...]），惰性过期清理，
+不含租户维度（多租户已移除）。重启后会话不保留。
 """
-import json
-
-import redis as _redis
+import threading
+import time
 
 import config
 
-_client = None
 
-
-def get_redis():
-    """懒加载单例 Redis 客户端（decode_responses=True）。"""
-    global _client
-    if _client is None:
-        _client = _redis.from_url(config.REDIS_URL, decode_responses=True)
-    return _client
-
-
-class RedisSessionStore:
-    """基于 Redis 的会话历史存储。"""
+class MemorySessionStore:
+    """基于进程内 dict 的会话历史存储，线程安全，带 TTL 惰性清理。"""
 
     def __init__(self):
-        self._r = get_redis()
+        self._sessions: dict[str, list[dict]] = {}
+        self._last_access: dict[str, float] = {}
+        self._lock = threading.Lock()
 
-    def _key(self, tenant_id: str, session_id: str) -> str:
-        return f"session:{tenant_id}:{session_id}"
+    def _gc(self) -> None:
+        now = time.time()
+        expired = [k for k, ts in self._last_access.items() if now - ts > config.SESSION_TTL_SECONDS]
+        for k in expired:
+            self._sessions.pop(k, None)
+            self._last_access.pop(k, None)
 
-    def get_history(self, tenant_id: str, session_id: str) -> list[dict]:
+    def get_history(self, session_id: str) -> list[dict]:
         """返回会话历史（[{role, content}, ...]），空会话返回 []。"""
-        raw_list = self._r.lrange(self._key(tenant_id, session_id), 0, -1)
-        history = []
-        for raw in raw_list:
-            try:
-                item = json.loads(raw)
-                if isinstance(item, dict):
-                    history.append(item)
-            except (json.JSONDecodeError, TypeError):
-                continue
-        return history
+        with self._lock:
+            self._gc()
+            self._last_access[session_id] = time.time()
+            return list(self._sessions.get(session_id, []))
 
-    def append_turn(self, tenant_id: str, session_id: str, role: str, content: str) -> None:
-        """原子追加一条对话，限制保留最近 N 轮，刷新 TTL。"""
-        key = self._key(tenant_id, session_id)
-        pipe = self._r.pipeline()
-        pipe.rpush(key, json.dumps({"role": role, "content": content}, ensure_ascii=False))
-        # 只保留最近 MAX_HISTORY_TURNS*2 条（与 _build_prompt 折叠窗口一致），避免无限增长
-        pipe.ltrim(key, -config.MAX_HISTORY_TURNS * 2, -1)
-        pipe.expire(key, config.SESSION_TTL_SECONDS)
-        pipe.execute()
+    def append_turn(self, session_id: str, role: str, content: str) -> None:
+        """追加一条对话，限制保留最近 N 轮，刷新访问时间。"""
+        with self._lock:
+            self._gc()
+            hist = self._sessions.setdefault(session_id, [])
+            hist.append({"role": role, "content": content})
+            # 只保留最近 MAX_HISTORY_TURNS*2 条（与 agent 折叠窗口一致），避免无限增长
+            limit = config.MAX_HISTORY_TURNS * 2
+            if len(hist) > limit:
+                del hist[: len(hist) - limit]
+            self._last_access[session_id] = time.time()

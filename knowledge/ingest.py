@@ -99,12 +99,6 @@ def ingest() -> None:
         embedding_function=get_embedding_function(),
     )
 
-    # 迁移：旧 schema（分块无 tenant_id）一次性清空重建，保证多租户隔离字段齐全
-    existing = collection.get(include=["metadatas"])
-    if existing["ids"] and any((m or {}).get("tenant_id") is None for m in existing["metadatas"]):
-        collection.delete(ids=existing["ids"])
-        print("[ingest] 检测到旧 schema（缺 tenant_id），已清空，即将按多租户重导")
-
     files = list(_iter_docs(docs_dir))
     if not files:
         print(f"[ingest] 未在 {docs_dir} 下找到任何 .txt/.md/.pdf 文档")
@@ -120,8 +114,7 @@ def ingest() -> None:
         meta = lifecycle.meta_for_source(manifest, path.name)
         # 文件名 + 修改时间 + 生命周期元数据 + schema 版本 一起作为增量指纹：
         # 内容、元数据（owner/状态/有效期/版本）或分块逻辑任一变化都触发重导
-        tenant = meta["tenant"]
-        lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}|{tenant}"
+        lifecycle_fp = f"{meta['owner']}|{meta['status']}|{meta['valid_until']}|{meta['version']}"
         source_id = hashlib.md5(f"{path.name}:{mtime}:{lifecycle_fp}:{SCHEMA_VERSION}".encode()).hexdigest()[:16]
 
         existing = collection.get(where={"source_id": source_id}, include=[])
@@ -134,8 +127,8 @@ def ingest() -> None:
             print(f"[ingest] 跳过（空文件）：{path.name}")
             continue
 
-        # 删除该文件旧版本的分块（按 文档名+租户 精确删，跨租户同名文档不误删）
-        collection.delete(where={"$and": [{"source": path.name}, {"tenant_id": tenant}]})
+        # 删除该文件旧版本的分块（按文档名精确删）
+        collection.delete(where={"source": path.name})
 
         # 父子块 §5.7：child 用于检索（精准），parent 用于注入 LLM（上下文完整）
         child_chunks = split_text(text)
@@ -150,7 +143,6 @@ def ingest() -> None:
             "status": meta["status"],
             "valid_until": valid_until,
             "version": meta["version"],
-            "tenant_id": tenant,
         }
 
         ids: list[str] = []

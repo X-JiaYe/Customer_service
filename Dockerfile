@@ -10,7 +10,7 @@ ENV TORCH_INDEX_URL=${TORCH_INDEX_URL}
 
 WORKDIR /app
 
-# 先装 CPU torch：requirements 里 sentence-transformers / FlagEmbedding 依赖 torch，会被此版本满足，不再拉 CUDA 版
+# 先装 CPU torch：requirements 里 sentence-transformers 依赖 torch，会被此版本满足，不再拉 CUDA 版
 RUN pip install --no-cache-dir torch --index-url ${TORCH_INDEX_URL}
 
 # 再装其余依赖，利用 Docker 缓存层

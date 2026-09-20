@@ -5,31 +5,13 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      # 容器内用 Redis 服务名连接（覆盖 .env 里本地的 localhost），带密码
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-    depends_on:
-      - redis
     volumes:
       # ChromaDB 嵌入式运行在 app 内，持久化目录挂载出来
       - ./knowledge/chroma_db:/app/knowledge/chroma_db
       # 知识库文档目录
       - ./knowledge/docs:/app/knowledge/docs
-      # HuggingFace 模型缓存（embedding + reranker）持久化，避免每次重建容器都重新下载
+      # HuggingFace 模型缓存（embedding）持久化，避免每次重建容器都重新下载
       - hf_cache:/root/.cache/huggingface
-
-  redis:
-    image: redis:7-alpine
-    # AOF 持久化 §5.8：everysec 落盘，异常宕机最多丢 1 秒写，避免会话/审计全丢
-    # requirepass 从 REDIS_PASSWORD 注入（本地开发也必须设密码，避免裸奔）
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec",
-              "--requirepass", "${REDIS_PASSWORD}"]
-    # 只绑定回环 127.0.0.1，不对外暴露 6379（本地开发 app 跑宿主机连 localhost:6379）
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - redis_data:/data
 
 volumes:
   hf_cache:
-  redis_data:
